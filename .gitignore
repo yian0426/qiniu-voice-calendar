@@ -1,0 +1,64 @@
+# IntelliJ IDEA
+.idea/
+*.iml
+
+# Maven
+target/
+release.properties
+dependency-reduced-pom.xml
+buildNumber.properties
+.mvn/timing.properties
+
+# Eclipse
+.classpath
+.project
+.settings/
+
+# VS Code
+.vscode/
+
+# Build directories
+out/
+bin/
+build/
+
+# Generated files
+generated-sources/
+generated-resources/
+
+# Logs
+*.log
+logs/
+
+# OS files
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Environment
+.env
+.env.local
+
+# Java
+*.class
+*.jar
+*.war
+*.ear
+
+# Key / credential files
+*.jks
+*.keystore
+
+# Misc
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Ignore IDE/editor specific files
+*.swp
+._*
+.idea/**/*
+
+# End of file
