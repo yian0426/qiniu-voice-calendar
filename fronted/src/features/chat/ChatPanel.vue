@@ -11,7 +11,7 @@ import {
   ArrowDown,
 } from "@lucide/vue";
 import { ElMessage } from "element-plus";
-import { streamChat, abortCurrentStream } from "@/utils/request";
+import { streamChat, abortCurrentStream, uploadVoice } from "@/utils/request";
 import { useAuthStore } from "@/stores/auth";
 import { useEventStore } from "@/stores/events";
 import ChatMessageItem from "./ChatMessageItem.vue";
@@ -284,6 +284,188 @@ function extractCalendarJson(text: string) {
   }
 }
 
+/* ── Voice recording ── */
+const isRecording = ref(false);
+const mediaRecorder = ref<MediaRecorder | null>(null);
+const audioChunks = ref<Blob[]>([]);
+
+const toggleRecording = async () => {
+  if (isRecording.value) {
+    mediaRecorder.value?.stop();
+    return;
+  }
+  if (!authStore.isLoggedIn) {
+    ElMessage.warning("请先登录");
+    return;
+  }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    let mimeType = "audio/webm";
+    if (!MediaRecorder.isTypeSupported("audio/webm;codecs=opus")) {
+      mimeType = "audio/webm";
+    }
+    const recorder = new MediaRecorder(stream, {
+      mimeType: MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
+        ? "audio/webm;codecs=opus"
+        : "audio/webm",
+    });
+    mediaRecorder.value = recorder;
+    audioChunks.value = [];
+
+    recorder.ondataavailable = (e) => {
+      if (e.data.size > 0) audioChunks.value.push(e.data);
+    };
+
+    recorder.onstop = async () => {
+      stream.getTracks().forEach((t) => t.stop());
+      isRecording.value = false;
+      const blob = new Blob(audioChunks.value, { type: recorder.mimeType });
+      if (blob.size > 0) {
+        await sendVoiceMessage(blob);
+      }
+    };
+
+    recorder.start();
+    isRecording.value = true;
+  } catch (e: any) {
+    if (e.name === "NotAllowedError") {
+      ElMessage.error("请允许麦克风权限");
+    } else {
+      ElMessage.error("无法启动录音");
+    }
+  }
+};
+
+const sendVoiceMessage = async (audioBlob: Blob) => {
+  messages.value.push({
+    role: "user",
+    content: "[语音消息]",
+    timestamp: Date.now(),
+  });
+
+  const assistantMsg: ChatMessage = {
+    role: "assistant",
+    content: "",
+    isThinking: true,
+    timestamp: Date.now(),
+  };
+  messages.value.push(assistantMsg);
+  isStreaming.value = true;
+  await scrollToBottom();
+
+  thinkingTimer = setTimeout(() => {
+    if (assistantMsg.isThinking) {
+      assistantMsg.isThinking = false;
+      if (!assistantMsg.content) assistantMsg.content = "正在处理语音...";
+    }
+  }, 5000);
+
+  try {
+    const generator = uploadVoice(audioBlob, conversationId.value);
+    for await (const event of generator) {
+      if (!isStreaming.value) break;
+
+      switch (event.type) {
+        case "transcription":
+          const userMsg = messages.value.find(
+            (m) => m.role === "user" && m.content === "[语音消息]",
+          );
+          if (userMsg) userMsg.content = event.content || "[语音]";
+          break;
+        case "content":
+          if (assistantMsg.isThinking) {
+            assistantMsg.isThinking = false;
+            if (thinkingTimer) clearTimeout(thinkingTimer);
+          }
+          assistantMsg.content += event.content || "";
+          scrollToBottom();
+          break;
+        case "audio":
+          assistantMsg.audioUrl = event.url;
+          break;
+        case "status":
+          if (assistantMsg.isThinking) {
+            assistantMsg.isThinking = false;
+            if (thinkingTimer) clearTimeout(thinkingTimer);
+          }
+          assistantMsg.content = event.content || "处理中...";
+          scrollToBottom();
+          break;
+        case "tool_result":
+          if (thinkingTimer) clearTimeout(thinkingTimer);
+          assistantMsg.isThinking = false;
+          assistantMsg.content =
+            (event as any).result ||
+            event.content ||
+            assistantMsg.content ||
+            "操作已完成";
+          eventStore.debouncedFetch(
+            new Date(new Date().getFullYear(), new Date().getMonth(), 1)
+              .toISOString()
+              .slice(0, 10),
+            new Date(new Date().getFullYear(), new Date().getMonth() + 1, 0)
+              .toISOString()
+              .slice(0, 10),
+          );
+          scrollToBottom();
+          break;
+        case "event_data":
+          if (event.action && event.events) {
+            eventStore.applyFromAI({
+              action: event.action,
+              events: event.events,
+            });
+          }
+          break;
+        case "done":
+          if (event.conversationId) conversationId.value = event.conversationId;
+          break;
+        case "error":
+          if (thinkingTimer) clearTimeout(thinkingTimer);
+          assistantMsg.isThinking = false;
+          assistantMsg.content =
+            "抱歉，语音处理出错: " + (event.content || "未知错误");
+          ElMessage.error("语音处理出错");
+          break;
+      }
+    }
+  } catch (e: any) {
+    console.error("[ChatPanel] 语音流异常:", e);
+    if (thinkingTimer) clearTimeout(thinkingTimer);
+    assistantMsg.isThinking = false;
+    assistantMsg.content = "抱歉，网络请求失败: " + (e.message || "未知错误");
+    ElMessage.error("网络请求失败");
+  } finally {
+    if (thinkingTimer) clearTimeout(thinkingTimer);
+    assistantMsg.isThinking = false;
+    if (!assistantMsg.content) assistantMsg.content = "收到空回复，请重试。";
+    isStreaming.value = false;
+
+    extractCalendarJson(assistantMsg.content);
+    assistantMsg.content = assistantMsg.content
+      .replace(/```calendar-json\s*\n?[\s\S]*?\n?\s*```/g, "")
+      .trim();
+    if (!assistantMsg.content) assistantMsg.content = "操作已完成";
+
+    if (
+      assistantMsg.content.includes("已创建") ||
+      assistantMsg.content.includes("已修改") ||
+      assistantMsg.content.includes("已删除") ||
+      assistantMsg.content.includes("已标记") ||
+      assistantMsg.content.includes("已安排")
+    ) {
+      eventStore.debouncedFetch(
+        new Date(new Date().getFullYear(), new Date().getMonth(), 1)
+          .toISOString()
+          .slice(0, 10),
+        new Date(new Date().getFullYear(), new Date().getMonth() + 1, 0)
+          .toISOString()
+          .slice(0, 10),
+      );
+    }
+  }
+};
+
 /* ── Key binding ── */
 const onKeydown = (e: KeyboardEvent) => {
   if (e.key === "Enter" && !e.shiftKey) {
@@ -457,8 +639,15 @@ const suggestions = [
             @keydown="onKeydown"
           />
           <div class="input-actions">
-            <button class="icon-btn" title="语音输入">
-              <Mic :size="18" />
+            <button
+              class="icon-btn"
+              :class="{ recording: isRecording }"
+              :disabled="isStreaming && !isRecording"
+              @click="toggleRecording"
+              title="语音输入"
+            >
+              <Square v-if="isRecording" :size="14" fill="currentColor" />
+              <Mic v-else :size="18" />
             </button>
             <button
               class="icon-btn"
@@ -714,6 +903,14 @@ const suggestions = [
 .icon-btn:disabled {
   opacity: 0.3;
   cursor: not-allowed;
+}
+.icon-btn.recording {
+  color: #ef4444;
+  animation: pulse-record 1.2s infinite;
+}
+@keyframes pulse-record {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.4); }
+  50% { box-shadow: 0 0 0 8px rgba(239, 68, 68, 0); }
 }
 
 /* ═══ Send / Stop ═══ */

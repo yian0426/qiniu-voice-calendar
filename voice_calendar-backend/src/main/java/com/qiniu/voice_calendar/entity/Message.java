@@ -15,5 +15,8 @@ public class Message {
     private Long conversationId;
     private String role;     // "user", "assistant", "tool"
     private String content;
+    private String intent;
+    private String audioUrl;
+    private String metadata;
     private LocalDateTime createdAt;
 }

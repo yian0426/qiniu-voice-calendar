@@ -7,6 +7,7 @@ export interface ChatMessage {
   content: string;
   isThinking?: boolean;
   timestamp: number;
+  audioUrl?: string;
 }
 
 const props = defineProps<{
@@ -73,6 +74,11 @@ function formatTime(ts: number): string {
           ><span class="dot"></span>
         </div>
         <span class="generating-text">正在生成回复...</span>
+      </div>
+
+      <!-- Voice audio playback -->
+      <div v-if="msg.audioUrl" class="audio-player">
+        <audio :src="msg.audioUrl" controls preload="metadata" />
       </div>
     </div>
   </div>
@@ -264,6 +270,17 @@ function formatTime(ts: number): string {
   50% {
     opacity: 1;
   }
+}
+
+/* ═══ Audio player ═══ */
+.audio-player {
+  margin-top: 8px;
+}
+.audio-player audio {
+  width: 240px;
+  height: 32px;
+  border-radius: 16px;
+  filter: invert(0.85);
 }
 
 /* ═══ Message transition ═══ */

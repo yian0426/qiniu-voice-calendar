@@ -185,6 +185,7 @@ public class ChatServiceImpl implements ChatService {
         return list.stream()
                 .map(m -> MessageVO.builder()
                         .id(m.getId()).role(m.getRole()).content(m.getContent())
+                        .intent(m.getIntent()).audioUrl(m.getAudioUrl()).metadata(m.getMetadata())
                         .createdAt(m.getCreatedAt()).build())
                 .collect(Collectors.toList());
     }

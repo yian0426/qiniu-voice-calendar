@@ -85,12 +85,21 @@ export const request = <T = any>(
 // ── 聊天相关 ──
 
 export interface StreamEvent {
-  type: "content" | "status" | "done" | "error" | "tool_result" | "event_data";
+  type:
+    | "content"
+    | "status"
+    | "done"
+    | "error"
+    | "tool_result"
+    | "event_data"
+    | "transcription"
+    | "audio";
   content?: string;
   conversationId?: number;
   title?: string;
   toolName?: string;
   result?: string;
+  url?: string;
   // event_data fields
   action?: "create" | "update" | "delete" | "query";
   events?: Array<{
@@ -123,12 +132,6 @@ export function abortCurrentStream() {
 /**
  * 流式对话 — 使用 fetch + ReadableStream 消费 SSE
  * 返回 AsyncGenerator，逐个 yield StreamEvent
- *
- * 增强点：
- * - AbortController 支持外部取消
- * - 超时检测（30s 无数据自动断开）
- * - 完整的 done/error 信号保证
- * - 调试日志
  */
 export async function* streamChat(
   content: string,
@@ -137,7 +140,6 @@ export async function* streamChat(
   const baseUrl = import.meta.env.VITE_API_BASE_URL || "/api";
   const token = localStorage.getItem("token");
 
-  // 创建新的 AbortController，取消之前的（如果有）
   abortCurrentStream();
   const controller = new AbortController();
   currentAbortController = controller;
@@ -174,36 +176,41 @@ export async function* streamChat(
     currentAbortController = null;
     const errText = await response.text().catch(() => "");
     console.error(`[stream:${streamId}] HTTP ${response.status}: ${errText}`);
-
-    // 401/403: 清除登录状态并通知 UI
     if (response.status === 401 || response.status === 403) {
       console.warn(`[stream] HTTP ${response.status} — 清除登录状态`);
       localStorage.removeItem("token");
       window.dispatchEvent(new CustomEvent("auth:expired"));
       yield { type: "error", content: "登录已过期，请重新登录" };
     } else {
-      yield {
-        type: "error",
-        content: `HTTP ${response.status}: ${response.statusText}`,
-      };
+      yield { type: "error", content: `HTTP ${response.status}: ${response.statusText}` };
     }
     return;
   }
 
   const reader = response.body!.getReader();
+  try {
+    yield* parseSseStream(reader, controller, streamId);
+  } finally {
+    currentAbortController = null;
+  }
+}
+
+/** 解析 SSE 响应流，逐个 yield StreamEvent */
+async function* parseSseStream(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  controller: AbortController,
+  streamId: string,
+): AsyncGenerator<StreamEvent> {
   const decoder = new TextDecoder();
   let buffer = "";
   let eventCount = 0;
   let lastEventTime = Date.now();
   let receivedDone = false;
 
-  // 超时检测：30 秒无数据则自动断开
   const TIMEOUT_MS = 30_000;
   const timeoutId = setInterval(() => {
     if (Date.now() - lastEventTime > TIMEOUT_MS) {
-      console.warn(
-        `[stream:${streamId}] 超时 ${TIMEOUT_MS}ms 无数据，自动断开`,
-      );
+      console.warn(`[stream:${streamId}] 超时, 自动断开`);
       controller.abort();
     }
   }, 5_000);
@@ -215,7 +222,7 @@ export async function* streamChat(
         readResult = await reader.read();
       } catch (e: any) {
         if (e.name === "AbortError") {
-          console.debug(`[stream:${streamId}] 读取被中断 (abort)`);
+          console.debug(`[stream:${streamId}] 读取被中断`);
           break;
         }
         throw e;
@@ -223,9 +230,7 @@ export async function* streamChat(
 
       const { done, value } = readResult;
       if (done) {
-        console.debug(
-          `[stream:${streamId}] 流读取完毕 (done=true), 共 ${eventCount} 个事件`,
-        );
+        console.debug(`[stream:${streamId}] 流读取完毕, 共 ${eventCount} 个事件`);
         break;
       }
 
@@ -237,8 +242,6 @@ export async function* streamChat(
       for (const line of lines) {
         const trimmed = line.trim();
         if (!trimmed) continue;
-
-        // 跳过 SSE event 名称行（如 event:message）
         if (trimmed.startsWith("event:")) continue;
 
         if (trimmed.startsWith("data:")) {
@@ -249,53 +252,99 @@ export async function* streamChat(
             const data = JSON.parse(jsonStr) as StreamEvent;
             eventCount++;
             lastEventTime = Date.now();
-            console.debug(
-              `[stream:${streamId}] 事件 #${eventCount}: type=${data.type}`,
-            );
+            console.debug(`[stream:${streamId}] 事件 #${eventCount}: type=${data.type}`);
 
-            if (data.type === "done") {
-              receivedDone = true;
-              console.debug(`[stream:${streamId}] 收到 done 信号`);
-            }
+            if (data.type === "done") receivedDone = true;
 
             yield data;
 
-            // 收到 done 或 error 后不再继续读取
             if (data.type === "done" || data.type === "error") {
-              // 清空 buffer 中的剩余数据
               buffer = "";
               break;
             }
           } catch {
-            // 无法解析的行，跳过
-            console.debug(
-              `[stream:${streamId}] 跳过无法解析的行: ${jsonStr.slice(0, 80)}`,
-            );
+            console.debug(`[stream:${streamId}] 跳过: ${jsonStr.slice(0, 80)}`);
           }
         }
       }
 
-      // 如果已收到 done/error，退出外层循环
       if (receivedDone) break;
     }
 
-    // 兜底：如果流正常结束但没收到 done 信号，手动发送
     if (!receivedDone) {
-      console.warn(`[stream:${streamId}] 流已结束但未收到 done 信号，手动补发`);
+      console.warn(`[stream:${streamId}] 未收到 done, 手动补发`);
       yield { type: "done" };
     }
   } catch (e: any) {
-    console.error(`[stream:${streamId}] 流处理异常:`, e);
+    console.error(`[stream:${streamId}] 异常:`, e);
     yield { type: "error", content: `流处理异常: ${e.message}` };
   } finally {
     clearInterval(timeoutId);
-    currentAbortController = null;
     try {
       reader.releaseLock();
     } catch {
       /* ignore */
     }
-    console.debug(`[stream:${streamId}] 资源释放完成`);
+    console.debug(`[stream:${streamId}] 资源释放`);
+  }
+}
+
+/** 语音对话 — 上传音频 + SSE 流式响应 */
+export async function* uploadVoice(
+  audioBlob: Blob,
+  conversationId?: number,
+): AsyncGenerator<StreamEvent> {
+  const baseUrl = import.meta.env.VITE_API_BASE_URL || "/api";
+  const token = localStorage.getItem("token");
+
+  abortCurrentStream();
+  const controller = new AbortController();
+  currentAbortController = controller;
+
+  const streamId = Math.random().toString(36).slice(2, 8);
+  console.debug(`[voice:${streamId}] 上传音频, size=${audioBlob.size}`);
+
+  const formData = new FormData();
+  formData.append("audio", audioBlob, "recording.webm");
+  if (conversationId) formData.append("conversationId", String(conversationId));
+
+  let response: Response;
+  try {
+    response = await fetch(`${baseUrl}/chat/voice`, {
+      method: "POST",
+      headers: {
+        Authorization: token ? `Bearer ${token}` : "",
+      },
+      body: formData,
+      signal: controller.signal,
+    });
+  } catch (e: any) {
+    currentAbortController = null;
+    if (e.name === "AbortError") {
+      yield { type: "error", content: "请求已取消" };
+      return;
+    }
+    yield { type: "error", content: `网络请求失败: ${e.message}` };
+    return;
+  }
+
+  if (!response.ok) {
+    currentAbortController = null;
+    if (response.status === 401 || response.status === 403) {
+      localStorage.removeItem("token");
+      window.dispatchEvent(new CustomEvent("auth:expired"));
+      yield { type: "error", content: "登录已过期" };
+    } else {
+      yield { type: "error", content: `HTTP ${response.status}` };
+    }
+    return;
+  }
+
+  const reader = response.body!.getReader();
+  try {
+    yield* parseSseStream(reader, controller, streamId);
+  } finally {
+    currentAbortController = null;
   }
 }
 
@@ -391,6 +440,7 @@ export interface ProfileResponse {
 export const api = {
   // 聊天流
   streamChat,
+  uploadVoice,
 
   // ── 认证模块 ──
   register: (data: { username: string; password: string; email?: string }) =>
