@@ -1,11 +1,10 @@
 spring:
   application:
     name: voice_calendar-backend
-
   datasource:
     url: jdbc:mysql://localhost:3306/voice_calendar?useUnicode=true&characterEncoding=UTF-8&serverTimezone=Asia/Shanghai
     username: root
-    password: ${MYSQL_PASSWORD:200225}
+    password: ${MYSQL_PASSWORD:123456}
     driver-class-name: com.mysql.cj.jdbc.Driver
 
 mybatis-plus:

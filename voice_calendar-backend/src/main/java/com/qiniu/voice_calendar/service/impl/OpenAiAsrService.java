@@ -9,7 +9,6 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
-import java.io.ByteArrayInputStream;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -17,7 +16,6 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
 import java.util.UUID;
 
 @Slf4j
@@ -45,19 +43,24 @@ public class OpenAiAsrService implements AsrService {
                 authHeaderValue = aiProperties.getApiKey();
             }
 
+            String baseUrl = audioBaseUrl();
+
             HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create(aiProperties.getBaseUrl() + "/audio/transcriptions"))
+                    .uri(URI.create(baseUrl + "/audio/transcriptions"))
                     .header("Content-Type", "multipart/form-data; boundary=" + boundary)
                     .header(authHeaderName, authHeaderValue)
                     .POST(HttpRequest.BodyPublishers.ofByteArray(body))
                     .build();
+
+            log.debug("ASR request: url={}, model={}, mime={}, size={}",
+                    baseUrl + "/audio/transcriptions", aiProperties.getAsrModel(), mimeType, audioData.length);
 
             HttpResponse<String> response = httpClient.send(request,
                     HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
 
             if (response.statusCode() != 200) {
                 log.error("ASR API error ({}): {}", response.statusCode(), response.body());
-                throw new BusinessException(500, "语音识别失败");
+                throw new BusinessException(500, "语音识别失败，请重试或使用文字输入");
             }
 
             JsonNode json = objectMapper.readTree(response.body());
@@ -65,6 +68,7 @@ public class OpenAiAsrService implements AsrService {
             if (text == null || text.isBlank()) {
                 throw new BusinessException(500, "语音识别结果为空，请重试");
             }
+            log.info("ASR result: {}", text);
             return text.trim();
         } catch (BusinessException e) {
             throw e;
@@ -74,13 +78,17 @@ public class OpenAiAsrService implements AsrService {
         }
     }
 
+    private String audioBaseUrl() {
+        String audioUrl = aiProperties.getAudioBaseUrl();
+        return (audioUrl != null && !audioUrl.isBlank()) ? audioUrl : aiProperties.getBaseUrl();
+    }
+
     private byte[] buildMultipartBody(byte[] audioData, String mimeType, String boundary) {
         List<byte[]> parts = new ArrayList<>();
 
-        // file part
-        String ext = "webm".equals(mimeType) || mimeType.contains("webm") ? "webm"
+        String ext = mimeType.contains("webm") ? "webm"
                 : mimeType.contains("wav") ? "wav"
-                : mimeType.contains("mp3") || mimeType.contains("mpeg") ? "mp3"
+                : mimeType.contains("mpeg") || mimeType.contains("mp3") ? "mp3"
                 : "webm";
         parts.add(("--" + boundary + "\r\n" +
                 "Content-Disposition: form-data; name=\"file\"; filename=\"recording." + ext + "\"\r\n" +
@@ -88,14 +96,10 @@ public class OpenAiAsrService implements AsrService {
         parts.add(audioData);
         parts.add("\r\n".getBytes(StandardCharsets.UTF_8));
 
-        // model part
-        String model = aiProperties.getModel();
-        String asrModel = model != null && !model.isBlank() ? model : "whisper-1";
         parts.add(("--" + boundary + "\r\n" +
                 "Content-Disposition: form-data; name=\"model\"\r\n\r\n" +
-                asrModel + "\r\n").getBytes(StandardCharsets.UTF_8));
+                aiProperties.getAsrModel() + "\r\n").getBytes(StandardCharsets.UTF_8));
 
-        // end
         parts.add(("--" + boundary + "--\r\n").getBytes(StandardCharsets.UTF_8));
 
         int totalLen = parts.stream().mapToInt(b -> b.length).sum();

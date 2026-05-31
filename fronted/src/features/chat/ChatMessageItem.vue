@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Sparkles } from "@lucide/vue";
+import { Sparkles, Volume2 } from "@lucide/vue";
 
 /* ── Types ── */
 export interface ChatMessage {
@@ -21,6 +21,16 @@ const props = defineProps<{
 function formatTime(ts: number): string {
   const d = new Date(ts);
   return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+
+/* ── TTS 朗读 ── */
+function speakMessage(text: string) {
+  if (!window.speechSynthesis) return;
+  window.speechSynthesis.cancel();
+  const utterance = new SpeechSynthesisUtterance(text);
+  utterance.lang = "zh-CN";
+  utterance.rate = 1.1;
+  window.speechSynthesis.speak(utterance);
 }
 </script>
 
@@ -76,10 +86,15 @@ function formatTime(ts: number): string {
         <span class="generating-text">正在生成回复...</span>
       </div>
 
-      <!-- Voice audio playback -->
-      <div v-if="msg.audioUrl" class="audio-player">
-        <audio :src="msg.audioUrl" controls preload="metadata" />
-      </div>
+      <!-- TTS read-aloud button -->
+      <button
+        v-if="!isStreaming || !isLast"
+        class="speak-btn"
+        title="朗读"
+        @click="speakMessage(msg.content)"
+      >
+        <Volume2 :size="14" />
+      </button>
     </div>
   </div>
 </template>
@@ -272,15 +287,23 @@ function formatTime(ts: number): string {
   }
 }
 
-/* ═══ Audio player ═══ */
-.audio-player {
-  margin-top: 8px;
+/* ═══ Speak button ═══ */
+.speak-btn {
+  background: none;
+  border: none;
+  color: #888;
+  cursor: pointer;
+  padding: 4px;
+  margin-top: 4px;
+  margin-left: 2px;
+  border-radius: 6px;
+  display: inline-flex;
+  align-items: center;
+  transition: all 0.2s;
 }
-.audio-player audio {
-  width: 240px;
-  height: 32px;
-  border-radius: 16px;
-  filter: invert(0.85);
+.speak-btn:hover {
+  color: #a78bfa;
+  background: rgba(255, 255, 255, 0.05);
 }
 
 /* ═══ Message transition ═══ */

@@ -27,9 +27,9 @@ public class OpenAiTtsService implements TtsService {
     public byte[] synthesize(String text) {
         try {
             var bodyNode = objectMapper.createObjectNode();
-            bodyNode.put("model", "tts-1");
+            bodyNode.put("model", aiProperties.getTtsModel());
             bodyNode.put("input", text);
-            bodyNode.put("voice", "alloy");
+            bodyNode.put("voice", aiProperties.getTtsVoice());
 
             String bodyStr = objectMapper.writeValueAsString(bodyNode);
 
@@ -43,12 +43,17 @@ public class OpenAiTtsService implements TtsService {
                 authHeaderValue = aiProperties.getApiKey();
             }
 
+            String baseUrl = audioBaseUrl();
+
             HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create(aiProperties.getBaseUrl() + "/audio/speech"))
+                    .uri(URI.create(baseUrl + "/audio/speech"))
                     .header("Content-Type", "application/json")
                     .header(authHeaderName, authHeaderValue)
                     .POST(HttpRequest.BodyPublishers.ofString(bodyStr, StandardCharsets.UTF_8))
                     .build();
+
+            log.debug("TTS request: url={}, model={}, voice={}, textLen={}",
+                    baseUrl + "/audio/speech", aiProperties.getTtsModel(), aiProperties.getTtsVoice(), text.length());
 
             HttpResponse<byte[]> response = httpClient.send(request,
                     HttpResponse.BodyHandlers.ofByteArray());
@@ -59,6 +64,7 @@ public class OpenAiTtsService implements TtsService {
                 throw new BusinessException(500, "语音合成失败");
             }
 
+            log.info("TTS success, audio size={}bytes", response.body().length);
             return response.body();
         } catch (BusinessException e) {
             throw e;
@@ -66,5 +72,10 @@ public class OpenAiTtsService implements TtsService {
             log.error("TTS request failed", e);
             throw new BusinessException(500, "语音合成失败: " + e.getMessage());
         }
+    }
+
+    private String audioBaseUrl() {
+        String audioUrl = aiProperties.getAudioBaseUrl();
+        return (audioUrl != null && !audioUrl.isBlank()) ? audioUrl : aiProperties.getBaseUrl();
     }
 }

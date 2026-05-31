@@ -45,6 +45,8 @@ export const useEventStore = defineStore("events", () => {
   const eventsMap = ref<Map<number, CalendarEvent>>(new Map());
   const loading = ref(false);
   const fetchError = ref<string | null>(null);
+  /** AI 操作后的事件日期，用于触发日历导航（跨月可见性） */
+  const lastAiEventDate = ref<Date | null>(null);
 
   /* ── 派生数据：对外暴露数组格式（保持组件兼容） ── */
   const events = computed(() =>
@@ -195,6 +197,11 @@ export const useEventStore = defineStore("events", () => {
         eventsMap.value.set(ev.id, calendarEvent);
       }
     }
+    // 通知 AgendaPanel 导航到事件所在月份（解决跨月不可见问题）
+    if (data.events.length > 0 && data.action !== "delete" && data.action !== "query") {
+      const ev = data.events[0];
+      lastAiEventDate.value = ev.startTime ? new Date(ev.startTime) : null;
+    }
   }
 
   return {
@@ -218,5 +225,6 @@ export const useEventStore = defineStore("events", () => {
     removeEvent,
     // AI 集成
     applyFromAI,
+    lastAiEventDate,
   };
 });

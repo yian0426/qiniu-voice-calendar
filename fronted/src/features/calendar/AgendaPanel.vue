@@ -101,6 +101,20 @@ watch(
   },
 );
 
+// AI 创建跨月事件时自动导航到事件所在月份
+watch(
+  () => eventStore.lastAiEventDate,
+  (eventDate) => {
+    if (!eventDate) return;
+    const m = eventDate.getMonth();
+    const y = eventDate.getFullYear();
+    if (m !== currentMonth.value || y !== currentYear.value) {
+      currentDate.value = new Date(y, m, 1);
+      fetchEvents();
+    }
+  },
+);
+
 /* ── Tag UI helpers ── */
 function showTagInput() {
   inputTagVisible.value = true;

@@ -11,7 +11,7 @@ import {
   ArrowDown,
 } from "@lucide/vue";
 import { ElMessage } from "element-plus";
-import { streamChat, abortCurrentStream, uploadVoice } from "@/utils/request";
+import { streamChat, abortCurrentStream } from "@/utils/request";
 import { useAuthStore } from "@/stores/auth";
 import { useEventStore } from "@/stores/events";
 import ChatMessageItem from "./ChatMessageItem.vue";
@@ -185,12 +185,8 @@ const sendMessage = async (text?: string) => {
             "操作已完成";
           // 工具执行后重新拉取最新数据
           eventStore.debouncedFetch(
-            new Date(new Date().getFullYear(), new Date().getMonth(), 1)
-              .toISOString()
-              .slice(0, 10),
-            new Date(new Date().getFullYear(), new Date().getMonth() + 1, 0)
-              .toISOString()
-              .slice(0, 10),
+            formatDateStr(new Date(new Date().getFullYear(), new Date().getMonth(), 1)),
+            formatDateStr(new Date(new Date().getFullYear(), new Date().getMonth() + 1, 0)),
           );
           scrollToBottom();
           break;
@@ -251,12 +247,8 @@ const sendMessage = async (text?: string) => {
     ) {
       // 关键词命中时防抖拉取最新数据
       eventStore.debouncedFetch(
-        new Date(new Date().getFullYear(), new Date().getMonth(), 1)
-          .toISOString()
-          .slice(0, 10),
-        new Date(new Date().getFullYear(), new Date().getMonth() + 1, 0)
-          .toISOString()
-          .slice(0, 10),
+        formatDateStr(new Date(new Date().getFullYear(), new Date().getMonth(), 1)),
+        formatDateStr(new Date(new Date().getFullYear(), new Date().getMonth() + 1, 0)),
       );
     }
   }
@@ -284,187 +276,90 @@ function extractCalendarJson(text: string) {
   }
 }
 
-/* ── Voice recording ── */
+/* ── Voice: 浏览器原生 Web Speech API ── */
 const isRecording = ref(false);
-const mediaRecorder = ref<MediaRecorder | null>(null);
-const audioChunks = ref<Blob[]>([]);
+let recognition: any = null;
 
-const toggleRecording = async () => {
+function getRecognition(): any {
+  const Ctor = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+  if (!Ctor) return null;
+  const rec = new Ctor();
+  rec.lang = "zh-CN";
+  rec.interimResults = true;
+  rec.continuous = false;
+  return rec;
+}
+
+const toggleRecording = () => {
   if (isRecording.value) {
-    mediaRecorder.value?.stop();
+    recognition?.stop();
     return;
   }
   if (!authStore.isLoggedIn) {
     ElMessage.warning("请先登录");
     return;
   }
-  try {
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    let mimeType = "audio/webm";
-    if (!MediaRecorder.isTypeSupported("audio/webm;codecs=opus")) {
-      mimeType = "audio/webm";
-    }
-    const recorder = new MediaRecorder(stream, {
-      mimeType: MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
-        ? "audio/webm;codecs=opus"
-        : "audio/webm",
-    });
-    mediaRecorder.value = recorder;
-    audioChunks.value = [];
-
-    recorder.ondataavailable = (e) => {
-      if (e.data.size > 0) audioChunks.value.push(e.data);
-    };
-
-    recorder.onstop = async () => {
-      stream.getTracks().forEach((t) => t.stop());
-      isRecording.value = false;
-      const blob = new Blob(audioChunks.value, { type: recorder.mimeType });
-      if (blob.size > 0) {
-        await sendVoiceMessage(blob);
-      }
-    };
-
-    recorder.start();
-    isRecording.value = true;
-  } catch (e: any) {
-    if (e.name === "NotAllowedError") {
-      ElMessage.error("请允许麦克风权限");
-    } else {
-      ElMessage.error("无法启动录音");
-    }
+  const rec = getRecognition();
+  if (!rec) {
+    ElMessage.error("当前浏览器不支持语音识别，请使用 Chrome 或 Edge");
+    return;
   }
-};
+  recognition = rec;
 
-const sendVoiceMessage = async (audioBlob: Blob) => {
-  messages.value.push({
-    role: "user",
-    content: "[语音消息]",
-    timestamp: Date.now(),
-  });
-
-  const assistantMsg: ChatMessage = {
-    role: "assistant",
-    content: "",
-    isThinking: true,
-    timestamp: Date.now(),
+  rec.onresult = (event: any) => {
+    let interim = "";
+    let final = "";
+    for (let i = event.resultIndex; i < event.results.length; i++) {
+      const r = event.results[i];
+      if (r.isFinal) {
+        final += r[0].transcript;
+      } else {
+        interim += r[0].transcript;
+      }
+    }
+    inputText.value = (final + interim).trim();
   };
-  messages.value.push(assistantMsg);
-  isStreaming.value = true;
-  await scrollToBottom();
 
-  thinkingTimer = setTimeout(() => {
-    if (assistantMsg.isThinking) {
-      assistantMsg.isThinking = false;
-      if (!assistantMsg.content) assistantMsg.content = "正在处理语音...";
+  rec.onerror = (event: any) => {
+    console.error("[Speech] 错误:", event.error);
+    if (event.error === "not-allowed") {
+      ElMessage.error("请允许麦克风权限");
+    } else if (event.error !== "no-speech") {
+      ElMessage.error("语音识别出错: " + event.error);
     }
-  }, 5000);
+    isRecording.value = false;
+  };
 
-  try {
-    const generator = uploadVoice(audioBlob, conversationId.value);
-    for await (const event of generator) {
-      if (!isStreaming.value) break;
-
-      switch (event.type) {
-        case "transcription":
-          const userMsg = messages.value.find(
-            (m) => m.role === "user" && m.content === "[语音消息]",
-          );
-          if (userMsg) userMsg.content = event.content || "[语音]";
-          break;
-        case "content":
-          if (assistantMsg.isThinking) {
-            assistantMsg.isThinking = false;
-            if (thinkingTimer) clearTimeout(thinkingTimer);
-          }
-          assistantMsg.content += event.content || "";
-          scrollToBottom();
-          break;
-        case "audio":
-          assistantMsg.audioUrl = event.url;
-          break;
-        case "status":
-          if (assistantMsg.isThinking) {
-            assistantMsg.isThinking = false;
-            if (thinkingTimer) clearTimeout(thinkingTimer);
-          }
-          assistantMsg.content = event.content || "处理中...";
-          scrollToBottom();
-          break;
-        case "tool_result":
-          if (thinkingTimer) clearTimeout(thinkingTimer);
-          assistantMsg.isThinking = false;
-          assistantMsg.content =
-            (event as any).result ||
-            event.content ||
-            assistantMsg.content ||
-            "操作已完成";
-          eventStore.debouncedFetch(
-            new Date(new Date().getFullYear(), new Date().getMonth(), 1)
-              .toISOString()
-              .slice(0, 10),
-            new Date(new Date().getFullYear(), new Date().getMonth() + 1, 0)
-              .toISOString()
-              .slice(0, 10),
-          );
-          scrollToBottom();
-          break;
-        case "event_data":
-          if (event.action && event.events) {
-            eventStore.applyFromAI({
-              action: event.action,
-              events: event.events,
-            });
-          }
-          break;
-        case "done":
-          if (event.conversationId) conversationId.value = event.conversationId;
-          break;
-        case "error":
-          if (thinkingTimer) clearTimeout(thinkingTimer);
-          assistantMsg.isThinking = false;
-          assistantMsg.content =
-            "抱歉，语音处理出错: " + (event.content || "未知错误");
-          ElMessage.error("语音处理出错");
-          break;
-      }
+  rec.onend = () => {
+    isRecording.value = false;
+    // 如果有识别结果，自动发送
+    if (inputText.value.trim()) {
+      sendMessage();
     }
-  } catch (e: any) {
-    console.error("[ChatPanel] 语音流异常:", e);
-    if (thinkingTimer) clearTimeout(thinkingTimer);
-    assistantMsg.isThinking = false;
-    assistantMsg.content = "抱歉，网络请求失败: " + (e.message || "未知错误");
-    ElMessage.error("网络请求失败");
-  } finally {
-    if (thinkingTimer) clearTimeout(thinkingTimer);
-    assistantMsg.isThinking = false;
-    if (!assistantMsg.content) assistantMsg.content = "收到空回复，请重试。";
-    isStreaming.value = false;
+  };
 
-    extractCalendarJson(assistantMsg.content);
-    assistantMsg.content = assistantMsg.content
-      .replace(/```calendar-json\s*\n?[\s\S]*?\n?\s*```/g, "")
-      .trim();
-    if (!assistantMsg.content) assistantMsg.content = "操作已完成";
-
-    if (
-      assistantMsg.content.includes("已创建") ||
-      assistantMsg.content.includes("已修改") ||
-      assistantMsg.content.includes("已删除") ||
-      assistantMsg.content.includes("已标记") ||
-      assistantMsg.content.includes("已安排")
-    ) {
-      eventStore.debouncedFetch(
-        new Date(new Date().getFullYear(), new Date().getMonth(), 1)
-          .toISOString()
-          .slice(0, 10),
-        new Date(new Date().getFullYear(), new Date().getMonth() + 1, 0)
-          .toISOString()
-          .slice(0, 10),
-      );
-    }
-  }
+  rec.start();
+  isRecording.value = true;
 };
+
+/* ── TTS: 浏览器原生 SpeechSynthesis 朗读助手回复 ── */
+function speakMessage(text: string) {
+  if (!window.speechSynthesis) return;
+  window.speechSynthesis.cancel();
+  const utterance = new SpeechSynthesisUtterance(text);
+  utterance.lang = "zh-CN";
+  utterance.rate = 1.1;
+  utterance.pitch = 1;
+  window.speechSynthesis.speak(utterance);
+}
+
+/* ── Local date formatting (not UTC) ── */
+function formatDateStr(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
 
 /* ── Key binding ── */
 const onKeydown = (e: KeyboardEvent) => {
