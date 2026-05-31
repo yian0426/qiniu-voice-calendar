@@ -56,7 +56,17 @@ service.interceptors.response.use(
     return res as any;
   },
   (error: any) => {
+    const status = error?.response?.status;
     console.error("Response Error:", error);
+
+    // 401/403: token 失效或未登录，清除本地认证状态
+    if (status === 401 || status === 403) {
+      console.warn(`[request] HTTP ${status} — 清除登录状态`);
+      localStorage.removeItem("token");
+      // 触发一个自定义事件，让 UI 层响应
+      window.dispatchEvent(new CustomEvent("auth:expired"));
+    }
+
     return Promise.reject(error);
   },
 );
@@ -75,15 +85,50 @@ export const request = <T = any>(
 // ── 聊天相关 ──
 
 export interface StreamEvent {
-  type: "content" | "status" | "done" | "error";
+  type: "content" | "status" | "done" | "error" | "tool_result" | "event_data";
   content?: string;
   conversationId?: number;
   title?: string;
+  toolName?: string;
+  result?: string;
+  // event_data fields
+  action?: "create" | "update" | "delete" | "query";
+  events?: Array<{
+    id: number;
+    title?: string;
+    description?: string;
+    startTime?: string;
+    endTime?: string;
+    duration?: string;
+    location?: string;
+    status?: number;
+    participants?: string[];
+    tags?: string[];
+    reminderBefore?: number;
+  }>;
+}
+
+// ── 流式对话 AbortController 管理 ──
+let currentAbortController: AbortController | null = null;
+
+/** 取消当前正在进行的流式请求 */
+export function abortCurrentStream() {
+  if (currentAbortController) {
+    console.debug("[stream] 手动取消流式请求");
+    currentAbortController.abort();
+    currentAbortController = null;
+  }
 }
 
 /**
  * 流式对话 — 使用 fetch + ReadableStream 消费 SSE
  * 返回 AsyncGenerator，逐个 yield StreamEvent
+ *
+ * 增强点：
+ * - AbortController 支持外部取消
+ * - 超时检测（30s 无数据自动断开）
+ * - 完整的 done/error 信号保证
+ * - 调试日志
  */
 export async function* streamChat(
   content: string,
@@ -92,64 +137,169 @@ export async function* streamChat(
   const baseUrl = import.meta.env.VITE_API_BASE_URL || "/api";
   const token = localStorage.getItem("token");
 
-  const response = await fetch(`${baseUrl}/chat/stream`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: token ? `Bearer ${token}` : "",
-    },
-    body: JSON.stringify({ content, conversationId }),
-  });
+  // 创建新的 AbortController，取消之前的（如果有）
+  abortCurrentStream();
+  const controller = new AbortController();
+  currentAbortController = controller;
+
+  const streamId = Math.random().toString(36).slice(2, 8);
+  console.debug(
+    `[stream:${streamId}] 开始请求, content="${content.slice(0, 30)}..."`,
+  );
+
+  let response: Response;
+  try {
+    response = await fetch(`${baseUrl}/chat/stream`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: token ? `Bearer ${token}` : "",
+      },
+      body: JSON.stringify({ content, conversationId }),
+      signal: controller.signal,
+    });
+  } catch (e: any) {
+    currentAbortController = null;
+    if (e.name === "AbortError") {
+      console.debug(`[stream:${streamId}] 请求被取消`);
+      yield { type: "error", content: "请求已取消" };
+      return;
+    }
+    console.error(`[stream:${streamId}] 请求失败:`, e);
+    yield { type: "error", content: `网络请求失败: ${e.message}` };
+    return;
+  }
 
   if (!response.ok) {
-    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+    currentAbortController = null;
+    const errText = await response.text().catch(() => "");
+    console.error(`[stream:${streamId}] HTTP ${response.status}: ${errText}`);
+
+    // 401/403: 清除登录状态并通知 UI
+    if (response.status === 401 || response.status === 403) {
+      console.warn(`[stream] HTTP ${response.status} — 清除登录状态`);
+      localStorage.removeItem("token");
+      window.dispatchEvent(new CustomEvent("auth:expired"));
+      yield { type: "error", content: "登录已过期，请重新登录" };
+    } else {
+      yield {
+        type: "error",
+        content: `HTTP ${response.status}: ${response.statusText}`,
+      };
+    }
+    return;
   }
 
   const reader = response.body!.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
+  let eventCount = 0;
+  let lastEventTime = Date.now();
+  let receivedDone = false;
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
+  // 超时检测：30 秒无数据则自动断开
+  const TIMEOUT_MS = 30_000;
+  const timeoutId = setInterval(() => {
+    if (Date.now() - lastEventTime > TIMEOUT_MS) {
+      console.warn(
+        `[stream:${streamId}] 超时 ${TIMEOUT_MS}ms 无数据，自动断开`,
+      );
+      controller.abort();
+    }
+  }, 5_000);
 
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split("\n");
-    buffer = lines.pop() || "";
+  try {
+    while (true) {
+      let readResult: ReadableStreamReadResult<Uint8Array>;
+      try {
+        readResult = await reader.read();
+      } catch (e: any) {
+        if (e.name === "AbortError") {
+          console.debug(`[stream:${streamId}] 读取被中断 (abort)`);
+          break;
+        }
+        throw e;
+      }
 
-    for (const line of lines) {
-      if (line.startsWith("data:")) {
-        try {
-          const data = JSON.parse(line.slice(5).trim());
-          yield data as StreamEvent;
-        } catch {
-          // skip unparseable lines
+      const { done, value } = readResult;
+      if (done) {
+        console.debug(
+          `[stream:${streamId}] 流读取完毕 (done=true), 共 ${eventCount} 个事件`,
+        );
+        break;
+      }
+
+      lastEventTime = Date.now();
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+
+        // 跳过 SSE event 名称行（如 event:message）
+        if (trimmed.startsWith("event:")) continue;
+
+        if (trimmed.startsWith("data:")) {
+          const jsonStr = trimmed.slice(5).trim();
+          if (!jsonStr) continue;
+
+          try {
+            const data = JSON.parse(jsonStr) as StreamEvent;
+            eventCount++;
+            lastEventTime = Date.now();
+            console.debug(
+              `[stream:${streamId}] 事件 #${eventCount}: type=${data.type}`,
+            );
+
+            if (data.type === "done") {
+              receivedDone = true;
+              console.debug(`[stream:${streamId}] 收到 done 信号`);
+            }
+
+            yield data;
+
+            // 收到 done 或 error 后不再继续读取
+            if (data.type === "done" || data.type === "error") {
+              // 清空 buffer 中的剩余数据
+              buffer = "";
+              break;
+            }
+          } catch {
+            // 无法解析的行，跳过
+            console.debug(
+              `[stream:${streamId}] 跳过无法解析的行: ${jsonStr.slice(0, 80)}`,
+            );
+          }
         }
       }
+
+      // 如果已收到 done/error，退出外层循环
+      if (receivedDone) break;
     }
+
+    // 兜底：如果流正常结束但没收到 done 信号，手动发送
+    if (!receivedDone) {
+      console.warn(`[stream:${streamId}] 流已结束但未收到 done 信号，手动补发`);
+      yield { type: "done" };
+    }
+  } catch (e: any) {
+    console.error(`[stream:${streamId}] 流处理异常:`, e);
+    yield { type: "error", content: `流处理异常: ${e.message}` };
+  } finally {
+    clearInterval(timeoutId);
+    currentAbortController = null;
+    try {
+      reader.releaseLock();
+    } catch {
+      /* ignore */
+    }
+    console.debug(`[stream:${streamId}] 资源释放完成`);
   }
 }
 
-// API 端点定义
-export const api = {
-  // 聊天流
-  streamChat,
-  // 对话列表
-  getConversations: () =>
-    request<ConversationVO[]>({ url: "/conversations", method: "GET" }),
-  // 对话消息
-  getMessages: (conversationId: number) =>
-    request<MessageVO[]>({
-      url: `/conversations/${conversationId}/messages`,
-      method: "GET",
-    }),
-  // 删除对话
-  deleteConversation: (conversationId: number) =>
-    request<void>({
-      url: `/conversations/${conversationId}`,
-      method: "DELETE",
-    }),
-};
+// ── 类型定义 ──
 
 export interface ConversationVO {
   id: number;
@@ -164,3 +314,141 @@ export interface MessageVO {
   content: string;
   createdAt: string;
 }
+
+export interface EventVO {
+  id: number;
+  title: string;
+  description: string;
+  startTime: string;
+  endTime: string;
+  duration: string;
+  location: string;
+  status: number; // 0=未完成, 1=已完成
+  participants: string[];
+  tags: string[];
+  reminderBefore: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CreateEventRequest {
+  title: string;
+  description?: string;
+  startTime: string;
+  endTime: string;
+  duration?: string;
+  location?: string;
+  participants?: string[];
+  tags?: string[];
+  reminderBefore?: number;
+}
+
+export interface UpdateEventRequest extends CreateEventRequest {}
+
+export interface PatchEventRequest {
+  title?: string;
+  description?: string;
+  startTime?: string;
+  endTime?: string;
+  duration?: string;
+  location?: string;
+  participants?: string[];
+  tags?: string[];
+  reminderBefore?: number;
+}
+
+export interface TagVO {
+  id: number;
+  name: string;
+  color: string;
+  eventCount: number;
+}
+
+export interface PageData<T> {
+  total: number;
+  page: number;
+  size: number;
+  pages: number;
+  records: T[];
+}
+
+export interface LoginResponse {
+  userId: number;
+  username: string;
+  token: string;
+}
+
+export interface ProfileResponse {
+  id: number;
+  username: string;
+  email: string;
+  avatarUrl: string;
+  createdAt: string;
+}
+
+// ── API 端点定义 ──
+
+export const api = {
+  // 聊天流
+  streamChat,
+
+  // ── 认证模块 ──
+  register: (data: { username: string; password: string; email?: string }) =>
+    request<LoginResponse>({ url: "/auth/register", method: "POST", data }),
+  login: (data: { username: string; password: string }) =>
+    request<LoginResponse>({ url: "/auth/login", method: "POST", data }),
+  getProfile: () =>
+    request<ProfileResponse>({ url: "/auth/profile", method: "GET" }),
+  updateProfile: (data: { email?: string; avatarUrl?: string }) =>
+    request<void>({ url: "/auth/profile", method: "PUT", data }),
+
+  // ── 事件模块 ──
+  listEvents: (params?: {
+    startDate?: string;
+    endDate?: string;
+    status?: number;
+    tag?: string;
+    keyword?: string;
+    page?: number;
+    size?: number;
+  }) => request<PageData<EventVO>>({ url: "/events", method: "GET", params }),
+  getEvent: (id: number) =>
+    request<EventVO>({ url: `/events/${id}`, method: "GET" }),
+  createEvent: (data: CreateEventRequest) =>
+    request<EventVO>({ url: "/events", method: "POST", data }),
+  updateEvent: (id: number, data: UpdateEventRequest) =>
+    request<EventVO>({ url: `/events/${id}`, method: "PUT", data }),
+  patchEvent: (id: number, data: PatchEventRequest) =>
+    request<EventVO>({ url: `/events/${id}`, method: "PATCH", data }),
+  deleteEvent: (id: number) =>
+    request<void>({ url: `/events/${id}`, method: "DELETE" }),
+  toggleEventStatus: (id: number, status: number) =>
+    request<EventVO>({
+      url: `/events/${id}/status`,
+      method: "PATCH",
+      data: { status },
+    }),
+
+  // ── 标签模块 ──
+  listTags: () => request<TagVO[]>({ url: "/tags", method: "GET" }),
+  createTag: (data: { name: string; color?: string }) =>
+    request<TagVO>({ url: "/tags", method: "POST", data }),
+  updateTag: (id: number, data: { name?: string; color?: string }) =>
+    request<TagVO>({ url: `/tags/${id}`, method: "PUT", data }),
+  deleteTag: (id: number) =>
+    request<void>({ url: `/tags/${id}`, method: "DELETE" }),
+
+  // ── 对话模块 ──
+  getConversations: () =>
+    request<ConversationVO[]>({ url: "/conversations", method: "GET" }),
+  getMessages: (conversationId: number) =>
+    request<MessageVO[]>({
+      url: `/conversations/${conversationId}/messages`,
+      method: "GET",
+    }),
+  deleteConversation: (conversationId: number) =>
+    request<void>({
+      url: `/conversations/${conversationId}`,
+      method: "DELETE",
+    }),
+};

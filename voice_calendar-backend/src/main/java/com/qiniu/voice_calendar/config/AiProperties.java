@@ -11,4 +11,6 @@ public class AiProperties {
     private String apiKey = "";
     private String baseUrl = "https://api.openai.com/v1";
     private String model = "gpt-4o";
+    private String format = "openai"; // "openai" or "anthropic"
+    private String authStyle = "api-key"; // "api-key" or "bearer"
 }

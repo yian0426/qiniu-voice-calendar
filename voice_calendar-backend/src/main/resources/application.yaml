@@ -3,9 +3,9 @@ spring:
     name: voice_calendar-backend
 
   datasource:
-    url: jdbc:mysql://localhost:3306/voice_calendar?useUnicode=true&characterEncoding=utf8mb4&serverTimezone=Asia/Shanghai
+    url: jdbc:mysql://localhost:3306/voice_calendar?useUnicode=true&characterEncoding=UTF-8&serverTimezone=Asia/Shanghai
     username: root
-    password: ${MYSQL_PASSWORD:root}
+    password: ${MYSQL_PASSWORD:200225}
     driver-class-name: com.mysql.cj.jdbc.Driver
 
 mybatis-plus:
@@ -21,12 +21,14 @@ mybatis-plus:
 
 jwt:
   secret: ${JWT_SECRET:qiniu-voice-calendar-secret-key-change-in-production}
-  expiration: 7200000  # 2 hours in ms
+  expiration: 7200000 # 2 hours in ms
 
 ai:
-  api-key: ${AI_API_KEY:}
-  base-url: https://api.openai.com/v1
-  model: gpt-4o
+  api-key: ${AI_API_KEY:sk-ceyc4g11cqje8qhpm327bb2bmtk9nzprmgx1e741f90fsw67}
+  base-url: ${AI_BASE_URL:https://api.xiaomimimo.com/v1}
+  model: ${AI_MODEL:mimo-v2.5-pro}
+  format: ${AI_FORMAT:openai}
+  auth-style: ${AI_AUTH_STYLE:api-key}
 
 logging:
   level:

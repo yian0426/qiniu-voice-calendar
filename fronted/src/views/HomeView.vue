@@ -1,8 +1,25 @@
 ﻿<script setup lang="ts">
-import { Bell, PanelRightClose, Sparkles } from "@lucide/vue";
-import SidebarAvatar from "../components/SidebarAvatar.vue";
-import AgendaPanel from "../components/AgendaPanel.vue";
-import ChatPanel from "../components/ChatPanel.vue";
+import { ref, onMounted, onUnmounted } from "vue";
+import SidebarAvatar from "@/components/SidebarAvatar.vue";
+import AgendaPanel from "@/features/calendar/AgendaPanel.vue";
+import ChatPanel from "@/features/chat/ChatPanel.vue";
+import LoginDialog from "@/features/auth/LoginDialog.vue";
+import { useAuthStore } from "@/stores/auth";
+
+const authStore = useAuthStore();
+const showLogin = ref(!authStore.isLoggedIn);
+
+// 监听认证过期事件 — 403/401 时自动弹出登录框
+function onAuthExpired() {
+  authStore.clearAuth();
+  showLogin.value = true;
+}
+onMounted(() => window.addEventListener("auth:expired", onAuthExpired));
+onUnmounted(() => window.removeEventListener("auth:expired", onAuthExpired));
+
+function handleShowLogin() {
+  showLogin.value = true;
+}
 </script>
 
 <template>
@@ -22,21 +39,13 @@ import ChatPanel from "../components/ChatPanel.vue";
       </div>
     </div>
 
-    <SidebarAvatar />
+    <SidebarAvatar @show-login="handleShowLogin" />
 
     <div class="main-content">
       <AgendaPanel />
       <ChatPanel />
     </div>
 
-    <div class="right-floating-actions">
-      <button class="float-btn"><PanelRightClose :size="18" /></button>
-      <button class="float-btn active"><Sparkles :size="18" /></button>
-    </div>
-
-    <div class="notification-fab">
-      <div class="badge">1</div>
-      <Bell :size="20" />
-    </div>
+    <LoginDialog v-if="showLogin" />
   </div>
 </template>

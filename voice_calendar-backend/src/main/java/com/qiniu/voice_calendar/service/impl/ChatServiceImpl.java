@@ -38,6 +38,8 @@ public class ChatServiceImpl implements ChatService {
     @Override
     @Transactional
     public void chat(Long userId, ChatRequest request, Consumer<String> sseSender) {
+        log.info("[chat] 开始处理用户 {} 的消息: {}", userId, truncate(request.getContent(), 50));
+
         // 1. Get or create conversation
         Conversation conv;
         if (request.getConversationId() != null) {
@@ -53,6 +55,7 @@ public class ChatServiceImpl implements ChatService {
             conv.setUpdatedAt(LocalDateTime.now());
             conversationMapper.insert(conv);
         }
+        log.debug("[chat] 对话 ID: {}", conv.getId());
 
         // 2. Save user message
         Message userMsg = new Message();
@@ -74,6 +77,7 @@ public class ChatServiceImpl implements ChatService {
         var toolCalls = new ArrayList<StreamEvent>();
 
         List<Map<String, Object>> tools = buildToolDefinitions();
+        log.info("[chat] 第一次 LLM 调用 (带 tools, 共 {} 个工具)", tools.size());
         aiService.streamChat(llmMessages, tools, event -> {
             switch (event.type()) {
                 case CONTENT -> {
@@ -82,38 +86,56 @@ public class ChatServiceImpl implements ChatService {
                 }
                 case TOOL_CALL -> {
                     toolCalls.add(event);
+                    log.info("[chat] 收到工具调用: {} args={}", event.toolName(), event.arguments());
                     sendSse(sseSender, "status", "正在执行: " + event.toolName());
                 }
-                case ERROR -> sendSse(sseSender, "error", event.content() != null ? event.content() : "未知错误");
-                case DONE -> { /* handled after stream */ }
+                case ERROR -> {
+                    log.warn("[chat] LLM 流错误: {}", event.content());
+                    sendSse(sseSender, "error", event.content() != null ? event.content() : "未知错误");
+                }
+                case DONE -> log.debug("[chat] 第一次 LLM 流完成");
             }
         });
+        log.info("[chat] 第一次 LLM 调用结束, contentLen={}, toolCalls={}", assistantContent.length(), toolCalls.size());
 
         // 5. If there were tool calls, execute them and do a second LLM call
         String finalContent;
         if (!toolCalls.isEmpty()) {
+            sendSse(sseSender, "status", "正在理解你的意图...");
             // Add assistant tool_call message to LLM context
             for (var tc : toolCalls) {
                 llmMessages.add(new AiService.ChatMessage("assistant", tc.arguments(), tc.toolCallId(), tc.toolName()));
             }
             // Execute tool calls and add results
             for (var tc : toolCalls) {
-                String result = executeToolCall(userId, tc.toolName(), tc.arguments());
+                sendSse(sseSender, "status", "正在执行: " + describeToolCall(tc.toolName()));
+                String result = executeToolCall(userId, tc.toolName(), tc.arguments(), sseSender);
+                // Send tool result as content so user sees immediate feedback
+                sendSse(sseSender, "tool_result", Map.of(
+                    "toolName", tc.toolName(),
+                    "result", result
+                ));
                 llmMessages.add(new AiService.ChatMessage("tool", result, tc.toolCallId(), null));
             }
 
+            sendSse(sseSender, "status", "正在生成回复...");
             // Second LLM call — no tools
+            log.info("[chat] 第二次 LLM 调用 (无 tools)");
             aiService.streamChat(llmMessages, null, event -> {
                 switch (event.type()) {
                     case CONTENT -> {
                         assistantContent.append(event.content());
                         sendSse(sseSender, "content", event.content());
                     }
-                    case ERROR -> sendSse(sseSender, "error", event.content() != null ? event.content() : "未知错误");
-                    case DONE -> { /* ok */ }
+                    case ERROR -> {
+                        log.warn("[chat] 第二次 LLM 流错误: {}", event.content());
+                        sendSse(sseSender, "error", event.content() != null ? event.content() : "未知错误");
+                    }
+                    case DONE -> log.debug("[chat] 第二次 LLM 流完成");
                     default -> {}
                 }
             });
+            log.info("[chat] 第二次 LLM 调用结束, contentLen={}", assistantContent.length());
         }
 
         finalContent = assistantContent.toString();
@@ -131,7 +153,9 @@ public class ChatServiceImpl implements ChatService {
         conversationMapper.updateById(conv);
 
         // 7. Signal completion
+        log.info("[chat] 发送 done 信号, conversationId={}", conv.getId());
         sendSse(sseSender, "done", Map.of("conversationId", conv.getId(), "title", conv.getTitle()));
+        log.info("[chat] 用户 {} 的消息处理完成", userId);
     }
 
     @Override
@@ -182,8 +206,23 @@ public class ChatServiceImpl implements ChatService {
     private List<AiService.ChatMessage> buildLlmMessages(List<Message> history) {
         // Add system prompt as first message
         List<AiService.ChatMessage> result = new ArrayList<>();
+        String now = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy年MM月dd日 HH:mm"));
+        String today = LocalDate.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd"));
+        String tomorrow = LocalDate.now().plusDays(1).format(DateTimeFormatter.ofPattern("yyyy-MM-dd"));
+        String dayAfterTomorrow = LocalDate.now().plusDays(2).format(DateTimeFormatter.ofPattern("yyyy-MM-dd"));
         result.add(new AiService.ChatMessage("system",
-                "你是一个智能日历助手。你可以帮助用户管理日程，包括创建、查询、修改和删除事件。请用中文回复。当用户提到时间相关操作时，请结合当前时间进行理解。当前时间: " + LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy年MM月dd日 HH:mm"))));
+                "你是七牛语音日历的智能助手。你可以帮助用户创建、查询、修改和删除日历事件。请用简洁的中文回复。\n\n" +
+                "【重要】当前北京时间: " + now + "，今天是 " + today + "，明天是 " + tomorrow + "。\n" +
+                "当用户说'今天'时使用日期 " + today + "，说'明天'时使用 " + tomorrow + "，说'后天'时使用 " + dayAfterTomorrow + "。\n" +
+                "如果用户没有明确指定时间，你应该主动询问具体时间。如果用户说'下午3点'，理解为当天15:00。\n" +
+                "回复要简洁友好，像一个贴心的日历管家。\n\n" +
+                "【输出规则】当你成功创建或修改了日程事件后，你的回复必须包含以下结构化数据块（方便前端渲染）：\n" +
+                "在自然语言确认之后，另起一行输出 ```calendar-json 代码块，包含事件的 JSON 数据，格式如：\n" +
+                "```calendar-json\n" +
+                "{\"action\":\"create\",\"events\":[{\"id\":1,\"title\":\"会议\",\"startTime\":\"" + today + "T15:00:00\",\"endTime\":\"" + today + "T16:00:00\"}]}\n" +
+                "```\n" +
+                "action 可选值: create / update / delete / query。events 数组包含受影响的事件（delete 只需 id）。\n" +
+                "如果没有日程操作，不要输出此代码块。"));
         for (var msg : history) {
             result.add(new AiService.ChatMessage(msg.getRole(), msg.getContent()));
         }
@@ -264,7 +303,7 @@ public class ChatServiceImpl implements ChatService {
     }
 
     @SuppressWarnings("unchecked")
-    private String executeToolCall(Long userId, String toolName, String arguments) {
+    private String executeToolCall(Long userId, String toolName, String arguments, Consumer<String> sseSender) {
         try {
             Map<String, Object> args = objectMapper.readValue(arguments, Map.class);
             return switch (toolName) {
@@ -278,6 +317,8 @@ public class ChatServiceImpl implements ChatService {
                     req.setParticipants((List<String>) args.get("participants"));
                     req.setTags((List<String>) args.get("tags"));
                     EventVO ev = eventService.createEvent(userId, req);
+                    // Send structured event data for immediate calendar rendering
+                    sendEventData(sseSender, "create", List.of(ev));
                     yield "事件已创建: " + ev.getTitle() + " (ID: " + ev.getId() + ")，时间: " + ev.getStartTime() + " ~ " + ev.getEndTime();
                 }
                 case "list_events" -> {
@@ -305,11 +346,15 @@ public class ChatServiceImpl implements ChatService {
                     if (args.get("endTime") != null) req.setEndTime(parseDateTime((String) args.get("endTime")));
                     if (args.get("location") != null) req.setLocation((String) args.get("location"));
                     EventVO ev = eventService.patchEvent(userId, eventId, req);
+                    // Send structured event data for immediate calendar rendering
+                    sendEventData(sseSender, "update", List.of(ev));
                     yield "事件已更新: " + ev.getTitle();
                 }
                 case "delete_event" -> {
                     Long eventId = ((Number) args.get("eventId")).longValue();
                     eventService.deleteEvent(userId, eventId);
+                    // Send structured event data for immediate calendar removal
+                    sendEventData(sseSender, "delete", List.of(EventVO.builder().id(eventId).build()));
                     yield "事件已删除 (ID: " + eventId + ")";
                 }
                 case "get_event" -> {
@@ -356,5 +401,42 @@ public class ChatServiceImpl implements ChatService {
         } catch (Exception e) {
             log.error("Failed to send SSE event", e);
         }
+    }
+
+    private void sendEventData(Consumer<String> sender, String action, List<EventVO> events) {
+        try {
+            Map<String, Object> payload = new LinkedHashMap<>();
+            payload.put("type", "event_data");
+            payload.put("action", action);
+            payload.put("events", events.stream().map(ev -> {
+                Map<String, Object> m = new LinkedHashMap<>();
+                m.put("id", ev.getId());
+                m.put("title", ev.getTitle());
+                m.put("description", ev.getDescription());
+                m.put("startTime", ev.getStartTime() != null ? ev.getStartTime().toString() : null);
+                m.put("endTime", ev.getEndTime() != null ? ev.getEndTime().toString() : null);
+                m.put("duration", ev.getDuration());
+                m.put("location", ev.getLocation());
+                m.put("status", ev.getStatus());
+                m.put("participants", ev.getParticipants());
+                m.put("tags", ev.getTags());
+                m.put("reminderBefore", ev.getReminderBefore());
+                return m;
+            }).toList());
+            sender.accept(objectMapper.writeValueAsString(payload));
+        } catch (Exception e) {
+            log.error("Failed to send event_data SSE", e);
+        }
+    }
+
+    private String describeToolCall(String toolName) {
+        return switch (toolName) {
+            case "create_event" -> "创建日程";
+            case "list_events" -> "查询日程";
+            case "update_event" -> "修改日程";
+            case "delete_event" -> "删除日程";
+            case "get_event" -> "查看日程详情";
+            default -> "处理中";
+        };
     }
 }

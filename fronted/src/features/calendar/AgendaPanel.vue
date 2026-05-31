@@ -1,197 +1,107 @@
 <script setup lang="ts">
-import { ref, computed, nextTick } from "vue";
+import { ref, computed, nextTick, watch, onMounted } from "vue";
 import { Calendar, Eye, Check, Clock, X } from "@lucide/vue";
 import { ElDialog, ElMessage, ElInput } from "element-plus";
 import CalendarDayCell from "./CalendarDayCell.vue";
-import ThemeTag from "./ThemeTag.vue";
+import ThemeTag from "@/components/ThemeTag.vue";
+import { api } from "@/utils/request";
+import { useAuthStore } from "@/stores/auth";
+import { useEventStore, type CalendarEvent } from "@/stores/events";
 
-/* ── Task type ── */
-interface Task {
-  id: string;
-  title: string;
-  description: string;
-  completed: boolean;
-  startDate: Date;
-  endDate: Date;
-  duration: string;
-  tags: string[];
-  participants: string[];
-  createdAt: Date;
-  reminder: string;
-}
-
-/* ── Mock data ── */
-const tasks = ref<Task[]>([
-  {
-    id: "1",
-    title: "👋 跟七牛语音日历打个招呼",
-    description:
-      "首次使用七牛语音日历，了解基本功能和操作指南。\nhttps://www.qiniu.com/calendar/guide",
-    completed: false,
-    startDate: new Date(2026, 4, 29, 17, 16),
-    endDate: new Date(2026, 4, 29, 17, 36),
-    duration: "20m",
-    tags: ["新手引导"],
-    participants: [],
-    createdAt: new Date(2026, 4, 29, 9, 6),
-    reminder: "5 min",
-  },
-  {
-    id: "2",
-    title: "聊天让七牛语音日历创建待办",
-    description: "通过与日历助手对话来创建新的待办事项。",
-    completed: false,
-    startDate: new Date(2026, 4, 29, 17, 41),
-    endDate: new Date(2026, 4, 29, 18, 1),
-    duration: "20m",
-    tags: ["效率"],
-    participants: [],
-    createdAt: new Date(2026, 4, 29, 9, 6),
-    reminder: "5 min",
-  },
-  {
-    id: "3",
-    title: "让七牛语音日历为任务加标签",
-    description: "学习如何使用标签对任务进行分类管理。",
-    completed: false,
-    startDate: new Date(2026, 4, 29, 18, 6),
-    endDate: new Date(2026, 4, 29, 18, 26),
-    duration: "20m",
-    tags: ["分类"],
-    participants: [],
-    createdAt: new Date(2026, 4, 29, 9, 6),
-    reminder: "5 min",
-  },
-  {
-    id: "4",
-    title: "💡 让七牛语音日历记录闪念",
-    description: "快速记录灵感和想法的功能演示。",
-    completed: false,
-    startDate: new Date(2026, 4, 30, 9, 0),
-    endDate: new Date(2026, 4, 30, 9, 20),
-    duration: "20m",
-    tags: ["灵感"],
-    participants: [],
-    createdAt: new Date(2026, 4, 29, 9, 6),
-    reminder: "10 min",
-  },
-  {
-    id: "5",
-    title: "让七牛语音日历记录图片笔记",
-    description: "通过语音描述来创建包含图片的笔记。",
-    completed: false,
-    startDate: new Date(2026, 4, 30, 9, 25),
-    endDate: new Date(2026, 4, 30, 9, 45),
-    duration: "20m",
-    tags: ["笔记"],
-    participants: [],
-    createdAt: new Date(2026, 4, 29, 9, 6),
-    reminder: "5 min",
-  },
-  {
-    id: "6",
-    title: "面试",
-    description: "候选人技术面试，请提前准备面试问题列表。",
-    completed: false,
-    startDate: new Date(2026, 4, 29, 17, 0),
-    endDate: new Date(2026, 4, 29, 18, 0),
-    duration: "1h",
-    tags: ["工作"],
-    participants: [],
-    createdAt: new Date(2026, 4, 25, 10, 0),
-    reminder: "15 min",
-  },
-  {
-    id: "7",
-    title: "📝 周报整理",
-    description: "整理本周工作内容并输出周报。",
-    completed: true,
-    startDate: new Date(2026, 4, 28, 14, 0),
-    endDate: new Date(2026, 4, 28, 15, 0),
-    duration: "1h",
-    tags: ["工作", "周报"],
-    participants: [],
-    createdAt: new Date(2026, 4, 25, 10, 0),
-    reminder: "10 min",
-  },
-  {
-    id: "8",
-    title: "🏋️ 健身",
-    description: "去健身房做力量训练。",
-    completed: true,
-    startDate: new Date(2026, 4, 27, 18, 0),
-    endDate: new Date(2026, 4, 27, 19, 30),
-    duration: "1h 30m",
-    tags: ["健康"],
-    participants: [],
-    createdAt: new Date(2026, 4, 26, 8, 0),
-    reminder: "30 min",
-  },
-  {
-    id: "9",
-    title: "团队站会",
-    description: "每日站会，同步进度和阻塞项。",
-    completed: false,
-    startDate: new Date(2026, 4, 24, 9, 30),
-    endDate: new Date(2026, 4, 24, 9, 45),
-    duration: "15m",
-    tags: ["工作"],
-    participants: [],
-    createdAt: new Date(2026, 4, 20, 8, 0),
-    reminder: "5 min",
-  },
-  {
-    id: "10",
-    title: "📅 月度复盘会议",
-    description: "五月工作复盘，讨论成果和改进点。",
-    completed: false,
-    startDate: new Date(2026, 4, 30, 15, 0),
-    endDate: new Date(2026, 4, 30, 16, 30),
-    duration: "1h 30m",
-    tags: ["工作", "会议"],
-    participants: [],
-    createdAt: new Date(2026, 4, 20, 8, 0),
-    reminder: "15 min",
-  },
-  {
-    id: "11",
-    title: "🎂 同事生日派对",
-    description: "庆祝小明生日，地点在休息区。",
-    completed: false,
-    startDate: new Date(2026, 4, 25, 16, 0),
-    endDate: new Date(2026, 4, 25, 17, 0),
-    duration: "1h",
-    tags: ["社交"],
-    participants: [],
-    createdAt: new Date(2026, 4, 22, 9, 0),
-    reminder: "30 min",
-  },
-  {
-    id: "12",
-    title: "读《设计模式》第三章",
-    description: "学习策略模式和观察者模式。",
-    completed: false,
-    startDate: new Date(2026, 4, 26, 20, 0),
-    endDate: new Date(2026, 4, 26, 21, 0),
-    duration: "1h",
-    tags: ["学习"],
-    participants: [],
-    createdAt: new Date(2026, 4, 23, 18, 0),
-    reminder: "10 min",
-  },
-]);
+const authStore = useAuthStore();
+const eventStore = useEventStore();
 
 /* ── State ── */
-const currentDate = ref(new Date(2026, 4, 1)); // May 2026
+const currentDate = ref(new Date());
 type ViewMode = "agenda" | "week" | "month";
 const viewMode = ref<ViewMode>("agenda");
 const showCompleted = ref(false);
-const selectedTask = ref<Task | null>(null);
+const selectedEvent = ref<CalendarEvent | null>(null);
 const dialogVisible = ref(false);
 const inputTagVisible = ref(false);
 const newTagValue = ref("");
 const tagInput = ref<InstanceType<typeof ElInput>>();
 
+/* ── 从 store 读取事件列表（响应式） ── */
+const events = computed(() => eventStore.events);
+const loading = computed(() => eventStore.loading);
+
+/* ── Data fetching ── */
+async function fetchEvents() {
+  if (!authStore.isLoggedIn) return;
+  let startStr: string;
+  let endStr: string;
+  if (viewMode.value === "week") {
+    const ws = getWeekStart(new Date());
+    const we = new Date(ws);
+    we.setDate(we.getDate() + 6);
+    startStr = formatDateStr(ws);
+    endStr = formatDateStr(we);
+  } else {
+    const firstDay = new Date(currentYear.value, currentMonth.value, 1);
+    const lastDay = new Date(currentYear.value, currentMonth.value + 1, 0);
+    startStr = formatDateStr(firstDay);
+    endStr = formatDateStr(lastDay);
+  }
+  try {
+    await eventStore.fetchEvents(startStr, endStr);
+  } catch (e: any) {
+    if (e?.response?.status === 403 || e?.response?.status === 401) {
+      authStore.clearAuth();
+    }
+  }
+}
+
+function formatDateStr(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+function formatDateTimeStr(d: Date): string {
+  return (
+    formatDateStr(d) +
+    "T" +
+    String(d.getHours()).padStart(2, "0") +
+    ":" +
+    String(d.getMinutes()).padStart(2, "0") +
+    ":00"
+  );
+}
+
+function reminderToLabel(minutes: number): string {
+  if (minutes <= 0) return "无";
+  if (minutes < 60) return `${minutes} min`;
+  return `${Math.floor(minutes / 60)}h`;
+}
+
+function reminderToValue(label: string): number {
+  const map: Record<string, number> = {
+    "5 min": 5,
+    "10 min": 10,
+    "15 min": 15,
+    "30 min": 30,
+    "1h": 60,
+  };
+  return map[label] || 0;
+}
+
+onMounted(() => {
+  if (authStore.isLoggedIn) {
+    fetchEvents();
+  }
+});
+
+// 监听登录状态变化 — 登录后自动拉取事件
+watch(
+  () => authStore.isLoggedIn,
+  (loggedIn) => {
+    if (loggedIn) fetchEvents();
+  },
+);
+
+/* ── Tag UI helpers ── */
 function showTagInput() {
   inputTagVisible.value = true;
   nextTick(() => {
@@ -202,38 +112,85 @@ function showTagInput() {
 function confirmTag() {
   if (
     newTagValue.value &&
-    selectedTask.value &&
-    !selectedTask.value.tags.includes(newTagValue.value)
+    selectedEvent.value &&
+    !selectedEvent.value.tags.includes(newTagValue.value)
   ) {
-    selectedTask.value.tags.push(newTagValue.value);
+    selectedEvent.value.tags.push(newTagValue.value);
   }
   inputTagVisible.value = false;
   newTagValue.value = "";
 }
 
 function removeTag(tag: string) {
-  if (selectedTask.value) {
-    const idx = selectedTask.value.tags.indexOf(tag);
-    if (idx !== -1) {
-      selectedTask.value.tags.splice(idx, 1);
-    }
+  if (selectedEvent.value) {
+    const idx = selectedEvent.value.tags.indexOf(tag);
+    if (idx !== -1) selectedEvent.value.tags.splice(idx, 1);
   }
 }
 
-function deleteTask() {
-  if (selectedTask.value) {
-    const idx = tasks.value.findIndex((t) => t.id === selectedTask.value!.id);
-    if (idx > -1) {
-      tasks.value.splice(idx, 1);
+/* ── CRUD operations ── */
+async function deleteEvent() {
+  if (!selectedEvent.value) return;
+  try {
+    const res = await api.deleteEvent(selectedEvent.value.id);
+    if (res.code === 200) {
+      eventStore.removeEvent(selectedEvent.value.id);
+      closeDialog();
+      ElMessage.success("已删除");
     }
+  } catch (e: any) {
+    ElMessage.error("删除失败: " + (e.message || ""));
   }
-  closeDialog();
-  ElMessage.success("已删除任务");
 }
 
-function saveTask() {
-  closeDialog();
-  ElMessage.success("已保存修改");
+async function saveEvent() {
+  if (!selectedEvent.value) return;
+  try {
+    const ev = selectedEvent.value;
+    const res = await api.patchEvent(ev.id, {
+      title: ev.title,
+      description: ev.description || undefined,
+      startTime: formatDateTimeStr(ev.startDate),
+      endTime: formatDateTimeStr(ev.endDate),
+      duration: ev.duration || undefined,
+      location: ev.location || undefined,
+      tags: ev.tags.length > 0 ? ev.tags : undefined,
+      reminderBefore: ev.reminderBefore,
+    });
+    if (res.code === 200 && res.data) {
+      // 用 store 更新
+      const updated = res.data;
+      eventStore.updateEvent(ev.id, {
+        title: updated.title,
+        description: updated.description || "",
+        completed: updated.status === 1,
+        startDate: new Date(updated.startTime),
+        endDate: new Date(updated.endTime),
+        duration: updated.duration || "",
+        tags: updated.tags || [],
+        participants: updated.participants || [],
+        location: updated.location || "",
+        reminderBefore: updated.reminderBefore || 0,
+      });
+      closeDialog();
+      ElMessage.success("已保存修改");
+    }
+  } catch (e: any) {
+    ElMessage.error("保存失败: " + (e.message || ""));
+  }
+}
+
+async function toggleComplete(event: CalendarEvent) {
+  const newStatus = event.completed ? 0 : 1;
+  try {
+    const res = await api.toggleEventStatus(event.id, newStatus);
+    if (res.code === 200) {
+      eventStore.updateEvent(event.id, { completed: newStatus === 1 });
+      ElMessage.success(newStatus === 1 ? "已标记为完成 ✅" : "已标记为未完成");
+    }
+  } catch (e: any) {
+    ElMessage.error("操作失败");
+  }
 }
 
 /* ── Computed ── */
@@ -244,38 +201,42 @@ const currentMonthName = computed(
     `${currentYear.value}年${["一月", "二月", "三月", "四月", "五月", "六月", "七月", "八月", "九月", "十月", "十一月", "十二月"][currentMonth.value]}`,
 );
 
-const filteredTasks = computed(() =>
-  tasks.value.filter((t) => showCompleted.value || !t.completed),
+const filteredEvents = computed(() =>
+  events.value.filter((e) => showCompleted.value || !e.completed),
 );
 
-const monthTasks = computed(() =>
-  filteredTasks.value.filter(
-    (t) =>
-      t.startDate.getFullYear() === currentYear.value &&
-      t.startDate.getMonth() === currentMonth.value,
+const monthEvents = computed(() =>
+  filteredEvents.value.filter(
+    (e) =>
+      e.startDate.getFullYear() === currentYear.value &&
+      e.startDate.getMonth() === currentMonth.value,
   ),
 );
 
 const agendaGrouped = computed(() => {
-  const groups: { date: Date; tasks: Task[] }[] = [];
-  const map = new Map<string, Task[]>();
-  for (const t of monthTasks.value) {
-    const key = t.startDate.toDateString();
+  const groups: { date: Date; events: CalendarEvent[] }[] = [];
+  const map = new Map<string, CalendarEvent[]>();
+  for (const e of monthEvents.value) {
+    const key = e.startDate.toDateString();
     if (!map.has(key)) map.set(key, []);
-    map.get(key)!.push(t);
+    map.get(key)!.push(e);
   }
-  for (const [key, tasks] of map) {
-    groups.push({ date: new Date(key), tasks });
+  for (const [key, evts] of map) {
+    groups.push({ date: new Date(key), events: evts });
   }
   groups.sort((a, b) => a.date.getTime() - b.date.getTime());
   return groups;
 });
 
-const weekStart = computed(() => {
-  const d = new Date(currentDate.value);
+/** 获取 date 所在周的周日 */
+function getWeekStart(date: Date): Date {
+  const d = new Date(date);
   d.setDate(d.getDate() - d.getDay());
+  d.setHours(0, 0, 0, 0);
   return d;
-});
+}
+
+const weekStart = computed(() => getWeekStart(new Date()));
 
 const weekDays = computed(() => {
   const days: Date[] = [];
@@ -285,14 +246,6 @@ const weekDays = computed(() => {
     days.push(d);
   }
   return days;
-});
-
-const weekTasks = computed(() => {
-  const end = new Date(weekDays.value[6]);
-  end.setHours(23, 59, 59, 999);
-  return filteredTasks.value.filter(
-    (t) => t.startDate >= weekStart.value && t.startDate <= end,
-  );
 });
 
 const monthGrid = computed(() => {
@@ -317,18 +270,18 @@ const monthGrid = computed(() => {
   return weeks;
 });
 
-function getTasksForDay(day: number) {
-  return filteredTasks.value.filter(
-    (t) =>
-      t.startDate.getFullYear() === currentYear.value &&
-      t.startDate.getMonth() === currentMonth.value &&
-      t.startDate.getDate() === day,
+function getEventsForDay(day: number) {
+  return filteredEvents.value.filter(
+    (e) =>
+      e.startDate.getFullYear() === currentYear.value &&
+      e.startDate.getMonth() === currentMonth.value &&
+      e.startDate.getDate() === day,
   );
 }
 
-function getTasksForDate(date: Date) {
-  return filteredTasks.value.filter(
-    (t) => t.startDate.toDateString() === date.toDateString(),
+function getEventsForDate(date: Date) {
+  return filteredEvents.value.filter(
+    (e) => e.startDate.toDateString() === date.toDateString(),
   );
 }
 
@@ -341,41 +294,37 @@ function timeLabel(d: Date): string {
 }
 
 function isToday(d: Date): boolean {
-  const t = new Date();
-  return d.toDateString() === t.toDateString();
+  return d.toDateString() === new Date().toDateString();
 }
 
-/* ── Actions ── */
+/* ── Navigation ── */
 function prevMonth() {
   currentDate.value = new Date(currentYear.value, currentMonth.value - 1, 1);
+  fetchEvents();
 }
-
 function nextMonth() {
   currentDate.value = new Date(currentYear.value, currentMonth.value + 1, 1);
+  fetchEvents();
 }
-
 function goToday() {
   currentDate.value = new Date();
-  currentDate.value.setDate(1);
+  fetchEvents();
 }
 
-function toggleComplete(task: Task) {
-  task.completed = !task.completed;
-  ElMessage.success(task.completed ? "已标记为完成 ✅" : "已标记为未完成");
-}
-
-function openDetail(task: Task) {
-  selectedTask.value = task;
+function openDetail(event: CalendarEvent) {
+  selectedEvent.value = event;
   dialogVisible.value = true;
 }
 
 function closeDialog() {
   dialogVisible.value = false;
-  selectedTask.value = null;
+  selectedEvent.value = null;
 }
 
 function setView(mode: ViewMode) {
   viewMode.value = mode;
+  // 切换视图时重新拉取对应范围的数据
+  fetchEvents();
 }
 
 const dayNames = ["日", "一", "二", "三", "四", "五", "六"];
@@ -420,8 +369,11 @@ const timeSlots = Array.from({ length: 24 }, (_, i) => `${i}:00`);
 
     <!-- Content -->
     <div class="agenda-content">
+      <!-- Loading state -->
+      <div v-if="loading" class="empty-state">加载中...</div>
+
       <!-- Agenda (list) view -->
-      <template v-if="viewMode === 'agenda'">
+      <template v-else-if="viewMode === 'agenda'">
         <div
           v-for="group in agendaGrouped"
           :key="group.date.toDateString()"
@@ -447,28 +399,27 @@ const timeSlots = Array.from({ length: 24 }, (_, i) => `${i}:00`);
             <div class="line" :class="isToday(group.date) ? '' : 'light'"></div>
           </div>
           <div
-            v-for="task in group.tasks"
-            :key="task.id"
+            v-for="ev in group.events"
+            :key="ev.id"
             class="task-item"
-            :class="{ 'is-completed': task.completed }"
-            @click="openDetail(task)"
+            :class="{ 'is-completed': ev.completed }"
+            @click="openDetail(ev)"
           >
             <div
               class="radio-circle"
-              :class="{ checked: task.completed }"
-              @click.stop="toggleComplete(task)"
+              :class="{ checked: ev.completed }"
+              @click.stop="toggleComplete(ev)"
             >
-              <Check v-if="task.completed" :size="10" />
+              <Check v-if="ev.completed" :size="10" />
             </div>
             <span class="time"
-              >{{ timeLabel(task.startDate) }} -
-              {{ timeLabel(task.endDate) }}</span
+              >{{ timeLabel(ev.startDate) }} - {{ timeLabel(ev.endDate) }}</span
             >
-            <span class="task-text">{{ task.title }}</span>
+            <span class="task-text">{{ ev.title }}</span>
           </div>
         </div>
         <div v-if="agendaGrouped.length === 0" class="empty-state">
-          当前月份暂无任务
+          当前月份暂无事件
         </div>
       </template>
 
@@ -500,8 +451,8 @@ const timeSlots = Array.from({ length: 24 }, (_, i) => `${i}:00`);
                   mode="week"
                   :is-today="isToday(day)"
                   :tasks="
-                    getTasksForDate(day).filter(
-                      (t) => t.startDate.getHours() === si,
+                    getEventsForDate(day).filter(
+                      (e) => e.startDate.getHours() === si,
                     )
                   "
                   @task-click="openDetail"
@@ -540,7 +491,7 @@ const timeSlots = Array.from({ length: 24 }, (_, i) => `${i}:00`);
                     day !== null &&
                     isToday(new Date(currentYear, currentMonth, day))
                   "
-                  :tasks="day !== null ? getTasksForDay(day) : []"
+                  :tasks="day !== null ? getEventsForDay(day) : []"
                   :max-display="3"
                   @task-click="openDetail"
                 />
@@ -551,10 +502,10 @@ const timeSlots = Array.from({ length: 24 }, (_, i) => `${i}:00`);
       </template>
     </div>
 
-    <!-- Task Detail Dialog -->
+    <!-- Event Detail Dialog -->
     <ElDialog
       v-model="dialogVisible"
-      :title="selectedTask?.title || '任务详情'"
+      :title="selectedEvent?.title || '事件详情'"
       width="420px"
       class="task-dialog custom-form-dialog"
       :close-on-click-modal="true"
@@ -562,8 +513,8 @@ const timeSlots = Array.from({ length: 24 }, (_, i) => `${i}:00`);
       align-center
       @close="closeDialog"
     >
-      <template v-if="selectedTask">
-        <el-form label-position="top" :model="selectedTask">
+      <template v-if="selectedEvent">
+        <el-form label-position="top" :model="selectedEvent">
           <el-form-item>
             <template #label>
               <div
@@ -577,7 +528,7 @@ const timeSlots = Array.from({ length: 24 }, (_, i) => `${i}:00`);
                 <span class="el-icon-edit" /> 标题
               </div>
             </template>
-            <el-input v-model="selectedTask.title" placeholder="请输入标题" />
+            <el-input v-model="selectedEvent.title" placeholder="请输入标题" />
           </el-form-item>
 
           <el-form-item>
@@ -594,7 +545,7 @@ const timeSlots = Array.from({ length: 24 }, (_, i) => `${i}:00`);
               </div>
             </template>
             <el-input
-              v-model="selectedTask.description"
+              v-model="selectedEvent.description"
               type="textarea"
               :rows="2"
               placeholder="添加描述..."
@@ -614,7 +565,7 @@ const timeSlots = Array.from({ length: 24 }, (_, i) => `${i}:00`);
                 <span class="el-icon-circle-check" /> 状态
               </div>
             </template>
-            <el-checkbox v-model="selectedTask.completed">完成</el-checkbox>
+            <el-checkbox v-model="selectedEvent.completed">完成</el-checkbox>
           </el-form-item>
 
           <div style="display: flex; gap: 16px; margin-bottom: -4px">
@@ -632,7 +583,7 @@ const timeSlots = Array.from({ length: 24 }, (_, i) => `${i}:00`);
                 </div>
               </template>
               <el-date-picker
-                v-model="selectedTask.startDate"
+                v-model="selectedEvent.startDate"
                 type="datetime"
                 format="YYYY年MM月DD日 HH:mm"
                 style="width: 100%"
@@ -656,7 +607,7 @@ const timeSlots = Array.from({ length: 24 }, (_, i) => `${i}:00`);
                 </div>
               </template>
               <el-input
-                v-model="selectedTask.duration"
+                v-model="selectedEvent.duration"
                 placeholder="例如：1h, 30m"
               />
             </el-form-item>
@@ -677,7 +628,7 @@ const timeSlots = Array.from({ length: 24 }, (_, i) => `${i}:00`);
                 </div>
               </template>
               <el-date-picker
-                v-model="selectedTask.endDate"
+                v-model="selectedEvent.endDate"
                 type="datetime"
                 format="YYYY年MM月DD日 HH:mm"
                 style="width: 100%"
@@ -696,16 +647,18 @@ const timeSlots = Array.from({ length: 24 }, (_, i) => `${i}:00`);
                   color: #888;
                 "
               >
-                <el-checkbox :checked="true" />
                 <span class="el-icon-bell" /> 提醒
               </div>
             </template>
-            <el-select v-model="selectedTask.reminder" style="width: 120px">
-              <el-option label="5分钟前" value="5 min" />
-              <el-option label="10分钟前" value="10 min" />
-              <el-option label="15分钟前" value="15 min" />
-              <el-option label="30分钟前" value="30 min" />
-              <el-option label="1小时前" value="1h" />
+            <el-select
+              v-model="selectedEvent.reminderBefore"
+              style="width: 120px"
+            >
+              <el-option label="5分钟前" :value="5" />
+              <el-option label="10分钟前" :value="10" />
+              <el-option label="15分钟前" :value="15" />
+              <el-option label="30分钟前" :value="30" />
+              <el-option label="1小时前" :value="60" />
             </el-select>
           </el-form-item>
 
@@ -731,7 +684,7 @@ const timeSlots = Array.from({ length: 24 }, (_, i) => `${i}:00`);
               "
             >
               <ThemeTag
-                v-for="tag in selectedTask.tags"
+                v-for="tag in selectedEvent.tags"
                 :key="tag"
                 type="info"
                 style="cursor: pointer"
@@ -780,7 +733,7 @@ const timeSlots = Array.from({ length: 24 }, (_, i) => `${i}:00`);
               plain
               size="small"
               style="border-radius: 6px; padding: 8px 16px"
-              @click="deleteTask"
+              @click="deleteEvent"
               >删除</el-button
             >
           </div>
@@ -788,7 +741,7 @@ const timeSlots = Array.from({ length: 24 }, (_, i) => `${i}:00`);
             <el-button
               type="info"
               color="#444"
-              @click="saveTask"
+              @click="saveEvent"
               style="border-radius: 6px; color: #fff; padding: 8px 16px"
               >修改保存</el-button
             >
