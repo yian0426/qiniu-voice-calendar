@@ -1,25 +1,225 @@
 <script setup lang="ts">
-import { ref, nextTick, watch, onMounted, onBeforeUnmount } from "vue";
+import {
+  ref,
+  nextTick,
+  watch,
+  computed,
+  onMounted,
+  onBeforeUnmount,
+} from "vue";
 import {
   Sparkles,
   Send,
   Square,
   Mic,
+  MicOff,
   Image as ImageIcon,
   X,
   CheckCircle,
   ArrowDown,
 } from "@lucide/vue";
 import { ElMessage } from "element-plus";
-import { streamChat, abortCurrentStream } from "@/utils/request";
+import { streamChat, processVoice, abortCurrentStream } from "@/utils/request";
 import { useAuthStore } from "@/stores/auth";
 import { useEventStore } from "@/stores/events";
+import { useSpeechRecognition } from "@/composables/useSpeechRecognition";
 import ChatMessageItem from "./ChatMessageItem.vue";
 import type { ChatMessage } from "./ChatMessageItem.vue";
 import axios from "axios";
 
 const authStore = useAuthStore();
 const eventStore = useEventStore();
+
+/* ── 语音识别 ── */
+const {
+  isRecording,
+  transcript: voiceTranscript,
+  interimTranscript,
+  isSupported: speechSupported,
+  error: speechError,
+  start: startRecording,
+  stop: stopRecording,
+  reset: resetVoice,
+} = useSpeechRecognition({
+  lang: "zh-CN",
+  continuous: false,
+  interimResults: true,
+});
+
+const isVoiceProcessing = ref(false);
+
+/** 任一流式处理进行中 */
+const isProcessing = computed(
+  () => isStreaming.value || isVoiceProcessing.value,
+);
+
+/** 中间转录文本显示在输入框中 */
+const voicePlaceholder = computed(() => {
+  if (!isRecording.value) return "";
+  return interimTranscript.value || "正在聆听...";
+});
+
+/** 切换语音录制 */
+function toggleVoiceRecording() {
+  if (!speechSupported.value) {
+    ElMessage.warning("当前浏览器不支持语音识别，请使用 Chrome 或 Edge");
+    return;
+  }
+  if (isRecording.value) {
+    stopRecording();
+  } else {
+    startRecording();
+  }
+}
+
+/** 语音识别结束后自动发送 */
+watch(
+  () => isRecording.value,
+  (wasRecording) => {
+    if (wasRecording) return;
+    // 录音结束，检查是否有转录文本
+    if (voiceTranscript.value.trim()) {
+      sendVoiceMessage(voiceTranscript.value.trim());
+      resetVoice();
+    }
+  },
+);
+
+/** 语音识别错误提示 */
+watch(
+  () => speechError.value,
+  (err) => {
+    if (err) ElMessage.warning(err);
+  },
+);
+
+/** 发送语音转录消息 */
+async function sendVoiceMessage(text: string) {
+  if (isStreaming.value || isVoiceProcessing.value) return;
+  if (!authStore.isLoggedIn) {
+    ElMessage.warning("请先登录");
+    return;
+  }
+
+  messages.value.push({
+    role: "user",
+    content: text,
+    timestamp: Date.now(),
+    isVoice: true,
+  });
+
+  const assistantMsg: ChatMessage = {
+    role: "assistant",
+    content: "",
+    isThinking: true,
+    timestamp: Date.now(),
+  };
+  messages.value.push(assistantMsg);
+  isVoiceProcessing.value = true;
+  await scrollToBottom();
+
+  thinkingTimer = setTimeout(() => {
+    if (assistantMsg.isThinking) {
+      assistantMsg.isThinking = false;
+      if (!assistantMsg.content) assistantMsg.content = "正在理解你的意图...";
+    }
+  }, 5000);
+
+  try {
+    const generator = processVoice(text);
+    for await (const event of generator) {
+      if (!isVoiceProcessing.value) break;
+
+      switch (event.type) {
+        case "content":
+          if (assistantMsg.isThinking) {
+            assistantMsg.isThinking = false;
+            if (thinkingTimer) clearTimeout(thinkingTimer);
+          }
+          assistantMsg.content += event.content || "";
+          scrollToBottom();
+          break;
+        case "status":
+          if (assistantMsg.isThinking) {
+            assistantMsg.isThinking = false;
+            if (thinkingTimer) clearTimeout(thinkingTimer);
+          }
+          assistantMsg.content = event.content || "处理中...";
+          scrollToBottom();
+          break;
+        case "tool_result":
+          if (thinkingTimer) clearTimeout(thinkingTimer);
+          assistantMsg.isThinking = false;
+          assistantMsg.content =
+            (event as any).result ||
+            (event as any).content ||
+            assistantMsg.content ||
+            "操作已完成";
+          eventStore.debouncedFetch(
+            new Date(new Date().getFullYear(), new Date().getMonth(), 1)
+              .toISOString()
+              .slice(0, 10),
+            new Date(new Date().getFullYear(), new Date().getMonth() + 1, 0)
+              .toISOString()
+              .slice(0, 10),
+          );
+          scrollToBottom();
+          break;
+        case "event_data":
+          if (event.action && event.events) {
+            eventStore.applyFromAI({
+              action: event.action,
+              events: event.events,
+            });
+          }
+          break;
+        case "done":
+          break;
+        case "error":
+          if (thinkingTimer) clearTimeout(thinkingTimer);
+          assistantMsg.isThinking = false;
+          assistantMsg.content =
+            "抱歉，出错了: " + (event.content || "未知错误");
+          ElMessage.error("语音处理出错");
+          break;
+      }
+    }
+  } catch (e: any) {
+    if (thinkingTimer) clearTimeout(thinkingTimer);
+    assistantMsg.isThinking = false;
+    assistantMsg.content = "抱歉，网络请求失败: " + (e.message || "未知错误");
+    ElMessage.error("网络请求失败");
+  } finally {
+    if (thinkingTimer) clearTimeout(thinkingTimer);
+    assistantMsg.isThinking = false;
+    if (!assistantMsg.content) assistantMsg.content = "收到空回复，请重试。";
+    isVoiceProcessing.value = false;
+
+    // 提取 calendar-json 代码块
+    extractCalendarJson(assistantMsg.content);
+    assistantMsg.content = assistantMsg.content
+      .replace(/```calendar-json\s*\n?[\s\S]*?\n?\s*```/g, "")
+      .trim();
+    if (!assistantMsg.content) assistantMsg.content = "操作已完成";
+
+    if (
+      assistantMsg.content.includes("已创建") ||
+      assistantMsg.content.includes("已修改") ||
+      assistantMsg.content.includes("已删除") ||
+      assistantMsg.content.includes("已标记") ||
+      assistantMsg.content.includes("已安排")
+    ) {
+      eventStore.debouncedFetch(
+        new Date(new Date().getFullYear(), new Date().getMonth(), 1)
+          .toISOString()
+          .slice(0, 10),
+        new Date(new Date().getFullYear(), new Date().getMonth() + 1, 0)
+          .toISOString()
+          .slice(0, 10),
+      );
+    }
+  }
+}
 
 /* ── Types ── */
 interface UploadImage {
@@ -107,6 +307,7 @@ const stopStreaming = () => {
   console.debug("[ChatPanel] stopStreaming 被调用");
   abortCurrentStream();
   isStreaming.value = false;
+  isVoiceProcessing.value = false;
 };
 
 /* ── Thinking timeout (5s max) ── */
@@ -447,18 +648,32 @@ const suggestions = [
           </div>
         </div>
         <div class="input-row">
+          <!-- 录音中指示器 -->
+          <div v-if="isRecording" class="voice-recording-indicator">
+            <span class="voice-dot"></span>
+            <span class="voice-wave">
+              <span></span><span></span><span></span><span></span><span></span>
+            </span>
+            <span class="voice-label">录音中...</span>
+          </div>
           <textarea
             ref="textareaRef"
             v-model="inputText"
             class="chat-textarea"
-            placeholder="输入消息..."
+            :placeholder="voicePlaceholder || '输入消息...'"
             rows="1"
             @input="autoResize"
             @keydown="onKeydown"
           />
           <div class="input-actions">
-            <button class="icon-btn" title="语音输入">
-              <Mic :size="18" />
+            <button
+              class="icon-btn"
+              :class="{ 'voice-active': isRecording }"
+              :title="isRecording ? '停止录音' : '语音输入'"
+              @click="toggleVoiceRecording"
+            >
+              <MicOff v-if="isRecording" :size="18" />
+              <Mic v-else :size="18" />
             </button>
             <button
               class="icon-btn"
@@ -476,7 +691,7 @@ const suggestions = [
               @change="handleImageUpload"
             />
             <button
-              v-if="!isStreaming"
+              v-if="!isProcessing"
               class="send-btn"
               :class="{ ready: inputText.trim() }"
               :disabled="!inputText.trim()"
@@ -640,6 +855,93 @@ const suggestions = [
 }
 .img-wrap:hover .img-remove {
   opacity: 1;
+}
+
+/* ═══ Voice Recording ═══ */
+.voice-active {
+  color: #ef4444 !important;
+  background: rgba(239, 68, 68, 0.15) !important;
+  animation: voice-pulse 1.2s ease-in-out infinite;
+}
+@keyframes voice-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.3);
+  }
+  50% {
+    box-shadow: 0 0 0 6px rgba(239, 68, 68, 0);
+  }
+}
+
+.voice-recording-indicator {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  margin-bottom: 4px;
+  background: rgba(239, 68, 68, 0.1);
+  border-radius: 8px;
+  border: 1px solid rgba(239, 68, 68, 0.2);
+}
+.voice-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #ef4444;
+  animation: voice-dot-blink 1s ease-in-out infinite;
+  flex-shrink: 0;
+}
+@keyframes voice-dot-blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.3;
+  }
+}
+.voice-wave {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  height: 20px;
+}
+.voice-wave span {
+  display: block;
+  width: 3px;
+  height: 4px;
+  background: #ef4444;
+  border-radius: 2px;
+  animation: wave-bar 0.8s ease-in-out infinite;
+}
+.voice-wave span:nth-child(1) {
+  animation-delay: 0s;
+}
+.voice-wave span:nth-child(2) {
+  animation-delay: 0.1s;
+}
+.voice-wave span:nth-child(3) {
+  animation-delay: 0.2s;
+}
+.voice-wave span:nth-child(4) {
+  animation-delay: 0.3s;
+}
+.voice-wave span:nth-child(5) {
+  animation-delay: 0.4s;
+}
+@keyframes wave-bar {
+  0%,
+  100% {
+    height: 4px;
+  }
+  50% {
+    height: 18px;
+  }
+}
+.voice-label {
+  color: #ef4444;
+  font-size: 12px;
+  white-space: nowrap;
 }
 
 /* ═══ Input area ═══ */

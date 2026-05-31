@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Sparkles } from "@lucide/vue";
+import { Sparkles, Mic } from "@lucide/vue";
 
 /* ── Types ── */
 export interface ChatMessage {
@@ -7,6 +7,7 @@ export interface ChatMessage {
   content: string;
   isThinking?: boolean;
   timestamp: number;
+  isVoice?: boolean;
 }
 
 const props = defineProps<{
@@ -36,7 +37,12 @@ function formatTime(ts: number): string {
       <div class="msg-time msg-time-right">
         {{ formatTime(msg.timestamp) }}
       </div>
-      <div class="bubble bubble-user">{{ msg.content }}</div>
+      <div class="bubble bubble-user">
+        <span v-if="msg.isVoice" class="voice-badge">
+          <Mic :size="12" />
+        </span>
+        {{ msg.content }}
+      </div>
     </div>
   </div>
 
@@ -159,6 +165,19 @@ function formatTime(ts: number): string {
   background: linear-gradient(135deg, #6c63ff, #8b5cf6);
   color: #fff;
   border-bottom-right-radius: 4px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.voice-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.25);
+  flex-shrink: 0;
 }
 .bubble-ai {
   background: rgba(255, 255, 255, 0.08);

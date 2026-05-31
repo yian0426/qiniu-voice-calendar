@@ -299,6 +299,171 @@ export async function* streamChat(
   }
 }
 
+// ── 语音处理 ──
+
+/**
+ * 语音处理流 — 将语音转录文本发送到后端，通过 MiMo AI 解析为日程操作。
+ * 返回 AsyncGenerator，逐个 yield StreamEvent。
+ */
+export async function* processVoice(text: string): AsyncGenerator<StreamEvent> {
+  const baseUrl = import.meta.env.VITE_API_BASE_URL || "/api";
+  const token = localStorage.getItem("token");
+
+  const controller = new AbortController();
+  currentAbortController = controller;
+
+  const streamId = Math.random().toString(36).slice(2, 8);
+  console.debug(
+    `[voice:${streamId}] 开始语音处理, text="${text.slice(0, 30)}..."`,
+  );
+
+  let response: Response;
+  try {
+    response = await fetch(`${baseUrl}/voice/process`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: token ? `Bearer ${token}` : "",
+      },
+      body: JSON.stringify({ text }),
+      signal: controller.signal,
+    });
+  } catch (e: any) {
+    currentAbortController = null;
+    if (e.name === "AbortError") {
+      console.debug(`[voice:${streamId}] 请求被取消`);
+      yield { type: "error", content: "请求已取消" };
+      return;
+    }
+    console.error(`[voice:${streamId}] 请求失败:`, e);
+    yield { type: "error", content: `网络请求失败: ${e.message}` };
+    return;
+  }
+
+  if (!response.ok) {
+    currentAbortController = null;
+    const errText = await response.text().catch(() => "");
+    console.error(`[voice:${streamId}] HTTP ${response.status}: ${errText}`);
+
+    // 尝试解析 JSON 错误响应
+    try {
+      const errJson = JSON.parse(errText);
+      if (
+        errJson.code === 401 ||
+        response.status === 401 ||
+        response.status === 403
+      ) {
+        localStorage.removeItem("token");
+        window.dispatchEvent(new CustomEvent("auth:expired"));
+        yield { type: "error", content: "登录已过期，请重新登录" };
+        return;
+      }
+      yield {
+        type: "error",
+        content: errJson.message || `服务器错误 (${response.status})`,
+      };
+      return;
+    } catch {
+      // 非 JSON 响应
+    }
+
+    if (response.status === 401 || response.status === 403) {
+      localStorage.removeItem("token");
+      window.dispatchEvent(new CustomEvent("auth:expired"));
+      yield { type: "error", content: "登录已过期，请重新登录" };
+    } else {
+      yield {
+        type: "error",
+        content: `HTTP ${response.status}: ${response.statusText}`,
+      };
+    }
+    return;
+  }
+
+  const reader = response.body!.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let eventCount = 0;
+  let lastEventTime = Date.now();
+  let receivedDone = false;
+
+  const TIMEOUT_MS = 60_000; // 语音处理给更长超时
+  const timeoutId = setInterval(() => {
+    if (Date.now() - lastEventTime > TIMEOUT_MS) {
+      console.warn(`[voice:${streamId}] 超时 ${TIMEOUT_MS}ms 无数据，自动断开`);
+      controller.abort();
+    }
+  }, 5_000);
+
+  try {
+    while (true) {
+      let readResult: ReadableStreamReadResult<Uint8Array>;
+      try {
+        readResult = await reader.read();
+      } catch (e: any) {
+        if (e.name === "AbortError") break;
+        throw e;
+      }
+
+      const { done, value } = readResult;
+      if (done) break;
+
+      lastEventTime = Date.now();
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        if (trimmed.startsWith("event:")) continue;
+
+        if (trimmed.startsWith("data:")) {
+          const jsonStr = trimmed.slice(5).trim();
+          if (!jsonStr) continue;
+
+          try {
+            const data = JSON.parse(jsonStr) as StreamEvent;
+            eventCount++;
+            lastEventTime = Date.now();
+
+            if (data.type === "done") {
+              receivedDone = true;
+            }
+
+            yield data;
+
+            if (data.type === "done" || data.type === "error") {
+              buffer = "";
+              break;
+            }
+          } catch {
+            // skip unparseable lines
+          }
+        }
+      }
+
+      if (receivedDone) break;
+    }
+
+    if (!receivedDone) {
+      yield { type: "done" };
+    }
+  } catch (e: any) {
+    console.error(`[voice:${streamId}] 流处理异常:`, e);
+    yield { type: "error", content: `流处理异常: ${e.message}` };
+  } finally {
+    clearInterval(timeoutId);
+    currentAbortController = null;
+    try {
+      reader.releaseLock();
+    } catch {
+      /* ignore */
+    }
+    console.debug(`[voice:${streamId}] 资源释放完成`);
+  }
+}
+
 // ── 类型定义 ──
 
 export interface ConversationVO {
@@ -391,6 +556,9 @@ export interface ProfileResponse {
 export const api = {
   // 聊天流
   streamChat,
+
+  // 语音处理流
+  processVoice: (text: string) => processVoice(text),
 
   // ── 认证模块 ──
   register: (data: { username: string; password: string; email?: string }) =>
