@@ -52,7 +52,8 @@ service.interceptors.response.use(
       }
       return Promise.reject(new Error(res.message || "Error"));
     }
-    return res;
+    // The interceptor unwraps ApiResponse; request() adjusts the return type
+    return res as any;
   },
   (error: any) => {
     console.error("Response Error:", error);
@@ -67,11 +68,99 @@ service.interceptors.response.use(
 export const request = <T = any>(
   config: AxiosRequestConfig,
 ): Promise<ApiResponse<T>> => {
-  return service.request<any, ApiResponse<T>>(config);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return service.request<any, any>(config);
 };
 
-// 预留的 API 请求示例
+// ── 聊天相关 ──
+
+export interface StreamEvent {
+  type: "content" | "status" | "done" | "error";
+  content?: string;
+  conversationId?: number;
+  title?: string;
+}
+
+/**
+ * 流式对话 — 使用 fetch + ReadableStream 消费 SSE
+ * 返回 AsyncGenerator，逐个 yield StreamEvent
+ */
+export async function* streamChat(
+  content: string,
+  conversationId?: number,
+): AsyncGenerator<StreamEvent> {
+  const baseUrl = import.meta.env.VITE_API_BASE_URL || "/api";
+  const token = localStorage.getItem("token");
+
+  const response = await fetch(`${baseUrl}/chat/stream`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: token ? `Bearer ${token}` : "",
+    },
+    body: JSON.stringify({ content, conversationId }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+  }
+
+  const reader = response.body!.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() || "";
+
+    for (const line of lines) {
+      if (line.startsWith("data:")) {
+        try {
+          const data = JSON.parse(line.slice(5).trim());
+          yield data as StreamEvent;
+        } catch {
+          // skip unparseable lines
+        }
+      }
+    }
+  }
+}
+
+// API 端点定义
 export const api = {
-  // 获取数据示例
-  // getUserInfo: () => request<UserInfo>({ url: '/user/info', method: 'GET' }),
+  // 聊天流
+  streamChat,
+  // 对话列表
+  getConversations: () =>
+    request<ConversationVO[]>({ url: "/conversations", method: "GET" }),
+  // 对话消息
+  getMessages: (conversationId: number) =>
+    request<MessageVO[]>({
+      url: `/conversations/${conversationId}/messages`,
+      method: "GET",
+    }),
+  // 删除对话
+  deleteConversation: (conversationId: number) =>
+    request<void>({
+      url: `/conversations/${conversationId}`,
+      method: "DELETE",
+    }),
 };
+
+export interface ConversationVO {
+  id: number;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface MessageVO {
+  id: number;
+  role: string;
+  content: string;
+  createdAt: string;
+}

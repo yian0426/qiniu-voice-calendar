@@ -23,6 +23,11 @@ jwt:
   secret: ${JWT_SECRET:qiniu-voice-calendar-secret-key-change-in-production}
   expiration: 7200000  # 2 hours in ms
 
+ai:
+  api-key: ${AI_API_KEY:}
+  base-url: https://api.openai.com/v1
+  model: gpt-4o
+
 logging:
   level:
     com.qiniu.voice_calendar: debug
